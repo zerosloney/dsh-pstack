@@ -117,6 +117,9 @@ State the one-line note and continue; do not improvise a substitute.
 | Event-driven automation | automations/benny | Needs public ingress (see above). Poll instead; benny's DSH mapping has the poll commands. |
 | Cursor-only host semantics | recall, reflect, show-me-your-work | DSH records approval/asked, approval/decided, model/selection, agent-preset/selected, workspace/changes and agent-instructions messages. It does not record which Cursor rule files matched, because that concept does not exist here. Read what exists with scripts/session-summary.mjs instead of claiming data is missing. |
 | Plugin cache edits | reflect, create-verification-skill, automate-me | plugins/cache/ does not exist here. Write the new skill to .dsh/skills/ or ~/.agents/skills/. |
+| Worktree-audit transcript signal | poteto-mode (worktree-cleanup playbook) | `scripts/worktree-audit.sh` greps `~/.cursor/projects/*/agent-transcripts` for plain JSONL, so on DSH its LAST_CHAT column stays `-` and the `verify-recent-chat` bucket never fires. Supply the signal yourself: before bucketing a worktree as safe, grep recent sessions for its path — `node <pstack>/scripts/session-transcript.mjs show --grep "<worktree-path>"` — and treat an unknown history as recent. |
+| External plugin skills and Cursor built-ins | poteto-mode playbooks, automate-me, reflect, poteto-help | `/deslop`, `control-cli` and `control-ui` ship in the cursor-team-kit plugin; `/create-skill`, `/loop` and `/autopilot` are Cursor built-ins. None exist here. Say so in one line and continue: unslop covers deslop's job, and a new skill is a SKILL.md written to `.dsh/skills/` or `~/.agents/skills/`. |
+| make-bot-ui routine plumbing | make-bot-ui | Its `update_state` / `SendToUser` calls and the `api2.cursor.sh` webhook are Cursor routine automation. On DSH a button that wakes an agent is `schedule_create` with `target: this_session`, or the webhook runtime when a public ingress exists. |
 
 ## Reply style
 

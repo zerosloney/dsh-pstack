@@ -130,7 +130,7 @@
 | statechart 的 TLA+/Java 语料 | 保留 | 纯数据与脚本，工具链存在时才跑 |
 | 上游 assets/logo.png | 替换 | 改为自绘 icon.svg |
 | Cursor 规则文件匹配过程 | 不可替换 | DSH 没有 rule-file registry；已注入的 instructions 仍以 message 事件记录，可用 session-summary 读 |
-| ~/.cursor/projects/*/agent-transcripts | 替换 | session-transcript.mjs：按 cwd 推 slug、按帧解 zstd、list/show/--grep/--tail |
+| ~/.cursor/projects/*/agent-transcripts | 替换 | session-transcript.mjs：按 cwd 推 slug、按帧解 zstd、list/show/--grep/--tail；worktree-audit.sh 内的硬编码路径不在替换范围，降级与替代命令见适配文档 degraded 表 |
 | ~/.cursor/rules/pstack-models.mdc | 替换 | 角色表写 ~/.dsh/AGENTS.md；实际路由由 subagent 的 provider+model 表达 |
 | .cursor/skills/、~/.cursor/skills/ | 映射 | .dsh/skills/、~/.agents/skills/ |
 | plugins/cache/ | 不存在 | 写入类技能改目标为 .dsh/skills 或 ~/.agents/skills |
