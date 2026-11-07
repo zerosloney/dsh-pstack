@@ -49,7 +49,7 @@ export function buildReviewPresets({ root }) {
       {
         id: 'tool-fs',
         name: '@deepseek-ai/dsh-tool-fs',
-        config: writable ? {} : { read: true, readImage: false, write: false, edit: false },
+        config: writable ? { applyPatch: false } : { read: true, readImage: false, write: false, edit: false, applyPatch: false },
       },
       { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
       { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },

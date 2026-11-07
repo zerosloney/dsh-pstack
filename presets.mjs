@@ -78,7 +78,7 @@ export function buildSubagentPresets({ root }) {
         { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65536 } },
         { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
         ...shellRows(),
-        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
+        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
         { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
         { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs' },
         { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
@@ -98,7 +98,7 @@ export function buildSubagentPresets({ root }) {
         { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65536 } },
         ...shellRows(),
         // Read-only is enforced by the tool surface, not by the brief.
-        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { read: true, readImage: false, write: false, edit: false } },
+        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { read: true, readImage: false, write: false, edit: false, applyPatch: false } },
         { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
         { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
         compaction({ pruner: false }),
@@ -123,7 +123,7 @@ export function buildSessionPreset({ root, personaAllowlist = SUBAGENT_PRESET_ID
     { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65536 } },
     { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
     ...shellRows(),
-    { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
+    { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
     { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
     { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs' },
     { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
@@ -172,6 +172,7 @@ export function buildSessionPreset({ root, personaAllowlist = SUBAGENT_PRESET_ID
     { id: 'present', name: '@deepseek-ai/dsh-tool-present' },
     // Profile management only exists in profile deployments; the expression runs at activation.
     { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: jsonExpr("!ctx.get('profileContext')") },
+    { id: 'tool-plugin-market', name: '@deepseek-ai/dsh-plugin-market/tools', disabled: true },
   ]
   return {
     id: SESSION_PRESET_ID,

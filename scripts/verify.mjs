@@ -174,7 +174,7 @@ check('preset pstack: exposes both pstack personas', JSON.stringify(spawnTool?.c
 check('preset pstack: no standing persona default', spawnTool?.config?.agentPreset === undefined)
 check('preset pstack: model selection stays on', spawnTool?.config?.modelSelection === true && spawnTool?.config?.modelDiscovery === true)
 check('preset pstack: keeps the standard tool surface',
-  ['tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-skill', 'tool-todo', 'tool-web', 'present', 'tool-goal', 'tool-schedule', 'tool-ask-user']
+  ['tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-skill', 'tool-todo', 'tool-web', 'present', 'tool-goal', 'tool-schedule', 'tool-ask-user', 'tool-plugin-market']
     .every(id => sessionFlat.some(row => row.id === id)))
 const planModeRow = sessionFlat.find(row => row.id === 'plan-mode')
 check('preset pstack: plan mode policy carried', typeof planModeRow?.config?.section === 'string' && planModeRow.config.section.length > 200)
@@ -187,7 +187,7 @@ const potetoPreset = byId.get('poteto-agent')
 const potetoFlat = flatten(potetoPreset.plugins)
 const potetoPersona = potetoFlat.find(row => row.id === 'persona')?.config?.prefix ?? ''
 check('preset poteto-agent: persona is the shipped brief', potetoPersona.includes('poteto-mode') && !potetoPersona.startsWith('---'))
-check('preset poteto-agent: can implement', potetoFlat.some(row => row.id === 'tool-fs' && row.config === undefined))
+check('preset poteto-agent: can implement', potetoFlat.some(row => row.id === 'tool-fs' && row.config?.write !== false && row.config?.edit !== false))
 check('preset poteto-agent: leaves questions to the parent', !potetoFlat.some(row => row.id === 'tool-ask-user'))
 check('preset poteto-agent: does not nest delegation', !potetoFlat.some(row => row.id === 'tool-subagent'))
 
