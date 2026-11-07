@@ -32,7 +32,7 @@
 | `README.md` | 上游 | **替换**为中文打包说明（安装、配置项、依赖、目录）；上游原文的 Cursor 安装段不再适用 |
 | `COMPATIBILITY.md` / `NOTICE.md` | 本移植 | 新增（移植对照 / 来源与改动清单） |
 | `locale/en.json` / `locale/zh.json` / `icon.svg` | 本移植 | 新增 |
-| `scripts/verify.mjs` / `scripts/verify-review.mjs` | 本移植 | 新增（静态 + 单测闸门，两段共 441 项） |
+| `scripts/verify.mjs` / `scripts/verify-review.mjs` | 本移植 | 新增（静态 + 单测闸门，两段共 442 项） |
 | `scripts/review-triage.mjs` | 本移植 | 新增（评审线程 triage：list/plan/record/draft/apply，幂等状态） |
 | `scripts/session-summary.mjs` | 本移植 | 新增（会话决策摘要：审批、注入指令、技能、工具、失败、文件） |
 | `skills/review-triage/SKILL.md` | 本移植 | 新增（把上游 bugbot-triage 规则变成可执行流程；上游无此技能） |

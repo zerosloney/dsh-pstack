@@ -8,7 +8,7 @@
  */
 import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { zstdCompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -182,6 +182,33 @@ check('preset pstack: plan mode policy is body text', !(planModeRow?.config?.sec
 const managerRow = sessionFlat.find(row => row.id === 'tool-plugin-manager')
 check('preset pstack: plugin manager guarded by profile context',
   managerRow?.disabled?.__jsExpr === "!ctx.get('profileContext')")
+
+// The self-comparison checks above cannot catch presets.mjs drifting from the
+// shipped preset-standard, so compare the top-level (id, name) rows against the
+// installed dsh-web-app copy. The patch yml carries !!js tags (not plain YAML),
+// but its top-level plugin rows are stably indented: `- id:` at 10 spaces with
+// `name:` on the next line; group config rows sit deeper and never match.
+const standardPatch = join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets', 'standard.patch.yml')
+if (!existsSync(standardPatch)) {
+  console.log('note: dsh-web-app not installed; standard mirror check skipped')
+} else {
+  const shippedLines = readFileSync(standardPatch, 'utf8').split(/\r?\n/)
+  const shipped = []
+  for (let i = 0; i < shippedLines.length; i++) {
+    const idMatch = /^ {10}- id: (\S+)$/.exec(shippedLines[i])
+    if (idMatch === null) continue
+    const nameMatch = /^ {12}name: (?:'([^']*)'|(\S+))$/.exec(shippedLines[i + 1] ?? '')
+    shipped.push({ id: idMatch[1], name: nameMatch !== null ? (nameMatch[1] ?? nameMatch[2]) : undefined })
+  }
+  const mirror = sessionPreset.plugins.map(({ id, name }) => ({ id, name }))
+  const firstDiff = shipped.findIndex((row, i) => row.id !== mirror[i]?.id || row.name !== mirror[i]?.name)
+  const mirrorDetail = shipped.length < 15
+    ? `extracted only ${shipped.length} top-level plugin rows from ${standardPatch}; the yml layout changed — update presets.mjs or this extraction`
+    : firstDiff === -1
+      ? ''
+      : `shipped has ${shipped.length} top-level rows, mirror has ${mirror.length}; first divergence at index ${firstDiff}: shipped ${JSON.stringify(shipped[firstDiff])} vs mirror ${JSON.stringify(mirror[firstDiff])}`
+  check('session preset mirrors shipped preset-standard (id+name sequence)', mirrorDetail === '', mirrorDetail)
+}
 
 const potetoPreset = byId.get('poteto-agent')
 const potetoFlat = flatten(potetoPreset.plugins)
