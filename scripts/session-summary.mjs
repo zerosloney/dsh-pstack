@@ -21,6 +21,11 @@ const KINDS = ['session', 'approvals', 'instructions', 'skills', 'tools', 'failu
 function fail(message) { console.error('session-summary: ' + message); process.exit(1) }
 
 function parseArgs(argv) {
+  if (argv.includes('-h') || argv.includes('--help')) {
+    console.log('usage: node session-summary.mjs [--cwd DIR] [--session ID] [--kinds a,b] [--json]')
+    console.log('kinds: ' + KINDS.join(', '))
+    process.exit(0)
+  }
   const options = { kinds: KINDS.slice() }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
@@ -36,6 +41,7 @@ function parseArgs(argv) {
       index += 1
       continue
     }
+    if (key !== 'json') fail('unknown argument: ' + token + ' (usage: node session-summary.mjs [--cwd DIR] [--session ID] [--kinds a,b] [--json])')
     if (value === undefined || value.slice(0, 2) === '--') { options[key] = true; continue }
     options[key] = value
     index += 1

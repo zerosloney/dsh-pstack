@@ -39,18 +39,22 @@ function fail(message) {
   process.exit(1)
 }
 
-// Flags that carry no value; every other --flag must be followed by one.
+// Flags that carry no value.
 const BOOLEAN_FLAGS = ['help', 'yes', 'json', 'all']
+// Flags that carry a value; any other --flag is rejected as unknown.
+const VALUE_FLAGS = ['pr', 'repo', 'thread', 'verdict', 'reason', 'reply', 'out', 'limit']
 
 export function parseArgs(argv) {
+  if (argv.some(token => token === '-h' || token === '--help')) return { command: 'help', options: {} }
   const [command = 'help', ...rest] = argv
   const options = {}
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index]
     if (token.slice(0, 2) !== '--') throw new Error('unexpected argument: ' + token)
     const key = token.slice(2)
+    if (!VALUE_FLAGS.includes(key) && !BOOLEAN_FLAGS.includes(key)) throw new Error('unknown argument: --' + key + '\n' + HELP)
     const next = rest[index + 1]
-    if (BOOLEAN_FLAGS.includes(key)) { options[key] = true; continue }
+    if (!VALUE_FLAGS.includes(key)) { options[key] = true; continue }
     if (next === undefined || next.slice(0, 2) === '--') throw new Error('--' + key + ' needs a value')
     options[key] = next
     index += 1

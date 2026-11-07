@@ -25,14 +25,26 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 
+function helpText() {
+  return [
+    'usage: session-transcript.mjs list [--cwd <dir>] [--all] [--json]',
+    '       session-transcript.mjs show [--cwd <dir>] [--session <id>] [--grep <text>] [--tail <n>]',
+  ].join('\n')
+}
+
+function help() {
+  console.log(helpText())
+  process.exit(0)
+}
+
 function usage(message) {
   if (message !== undefined) console.error(message)
-  console.error('usage: session-transcript.mjs list [--cwd <dir>] [--all] [--json]')
-  console.error('       session-transcript.mjs show [--cwd <dir>] [--session <id>] [--grep <text>] [--tail <n>]')
+  console.error(helpText())
   process.exit(2)
 }
 
 function parseArgs(argv) {
+  if (argv.some(token => token === '-h' || token === '--help')) help()
   const [command = 'list', ...rest] = argv
   const options = { command, cwd: process.cwd(), all: false, json: false }
   for (let index = 0; index < rest.length; index += 1) {
@@ -203,8 +215,8 @@ function allFramesText(buffer) {
   return Buffer.concat(parts).toString('utf8')
 }
 
-function describe(session, withHeader = true) {
-  const head = withHeader ? header(session.path) : undefined
+function describe(session) {
+  const head = header(session.path)
   return {
     sessionId: session.sessionId,
     createdAt: head?.createdAt === undefined ? undefined : new Date(head.createdAt).toISOString(),
@@ -224,8 +236,9 @@ function main() {
 
   if (options.command === 'list') {
     const slugs = options.all ? allSlugs() : [slug]
-    // `--all` never decompresses other workspaces: metadata only.
-    const rows = slugs.flatMap(candidate => sessionsIn(candidate).map(session => describe(session, !options.all)))
+    // Header parsing decodes only each log's first frame, so `--all` still
+    // surfaces metadata (depth/preset) and never prints other workspaces' bodies.
+    const rows = slugs.flatMap(candidate => sessionsIn(candidate).map(session => describe(session)))
     const scoped = options.all ? rows : rows.filter(row => row.cwd === undefined || samePath(resolve(row.cwd), resolve(options.cwd)))
     if (scoped.length === 0) {
       console.error(`no session under ${join(sessionsRoot(), slug)}`)
