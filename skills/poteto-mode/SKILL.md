@@ -10,6 +10,8 @@ color: yellow
 
 Bundled skills live at `../<name>/SKILL.md` from this file, so put this file's absolute path in every `poteto-agent` prompt.
 
+On DeepSeek Harness, read `../../docs/harness/deepseek-harness.md` from this file before following this playbook, once per session: it maps every Cursor tool, subagent field and path name in the pstack skills onto the harness you are in.
+
 ## Non-negotiables
 
 The Principles section below grounds every trigger. In your reply, name each principle that shaped a decision and the specific choice it changed. Cite only principles whose leaf SKILL.md you read this session.

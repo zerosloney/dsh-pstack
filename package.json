@@ -1,0 +1,76 @@
+{
+  "name": "dsh-pstack",
+  "version": "0.15.36",
+  "description": "DeepSeek Harness 移植版 pstack：58 个工程技能 + DSH 原生编排（会话/委派/评审分诊预设、模型路由、transcript 工具），可选注入会话级路由指令。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "pstack",
+    "poteto-mode",
+    "skills",
+    "workflow",
+    "principles",
+    "subagents",
+    "review-triage"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "presets.mjs",
+    "presets-review.mjs",
+    "router.md",
+    "presets/",
+    "cordis.patch.yml",
+    "skills/",
+    "agents/",
+    "docs/",
+    "automations/",
+    "scripts/",
+    "locale/",
+    "icon.svg",
+    "README.md",
+    "COMPATIBILITY.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node scripts/verify.mjs && node scripts/verify-review.mjs",
+    "verify:upstream": "node scripts/sync-upstream.mjs"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.0 <0.3.0-0",
+    "node": ">=22.19"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zerosloney/dsh-pstack.git"
+  },
+  "author": {
+    "name": "Lauren Tan",
+    "url": "https://github.com/cursor/plugins/tree/main/pstack"
+  },
+  "contributors": [
+    {
+      "name": "master0071",
+      "comment": "DeepSeek Harness port"
+    }
+  ],
+  "homepage": "https://github.com/cursor/plugins/tree/main/pstack",
+  "publishConfig": {
+    "access": "public"
+  }
+}
+

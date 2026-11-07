@@ -1,0 +1,35 @@
+# dsh-pstack 的组合层补丁。
+#
+# 1. pstack-router —— 本包的 node 半边（index.js / presets.mjs / presets-review.mjs）。它做三件事：
+#    (a) 注册 agent 预设：会话预设 pstack、两个委派预设 poteto-agent / comment-sicko、
+#        评审线程分诊预设 review-triage；review-triage-apply 只在 reviewTriage.apply 为 true 时注册。
+#    (b) 注册一条 system prompt 路由段落（文本在 router.md）。不要就关掉 enabled: false。
+#    (c) 不解析技能：技能由下面的 skill-filesystem 行装载。
+#
+# 2. pstack-skills —— 复用官方 @deepseek-ai/dsh-skill-filesystem 扫描本包 skills/。
+#    刻意不复用 profile 里已有的那一行：覆盖同名行会整份替换它的 config。
+#    includeDefaultRoots: false 让它只贡献 pstack 的技能；providerName 必须与已有实例区分。
+- insert:
+    - id: pstack-router
+      name: 'dsh-pstack'
+      config:
+        enabled: true
+        # A2 开关：true 才注册可写的 review-triage-apply 预设。
+        # 即使注册了，脚本仍要求 PSTACK_REVIEW_APPLY=1 且 --yes 才会发评论。
+        reviewTriage:
+          apply: false
+    - id: pstack-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: pstack
+        includeDefaultRoots: false
+        watch: true
+        customSkillDirs:
+          - !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('dsh-pstack/package.json')), 'skills')
+# 新会话默认进入 pstack 预设（上游的“默认就带编排”）。
+# 覆盖会整份替换该行的 config：这里只保留 default，selectedDefault（用户在预设下拉里的
+# 显式选择）优先级更高，所以切回 standard 不会被抹掉。
+- id: agent-preset-registry
+  config:
+    default: pstack
+
