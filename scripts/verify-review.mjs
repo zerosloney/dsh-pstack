@@ -471,10 +471,100 @@ try {
   rmSync(lockSandbox, { recursive: true, force: true })
 }
 
+// 15. comment counts: totalCount spans the whole thread; the first:20 node window under-reports
+let countError = ''
+let countQuery = ''
+let countItem = null
+try {
+  const twenty = Array.from({ length: 20 }, (_, i) => comment('n' + i, 'c' + i))
+  const countFetch = triage.fetchThreads('o/n', 13, args => {
+    countQuery = args.join(' ')
+    return JSON.stringify(ghPage([{ id: 'TC', isResolved: false, isOutdated: false, path: 'a.ts', line: 1, firstComments: { totalCount: 34, nodes: twenty }, lastComment: { nodes: [comment('n33', 'latest')] } }], false, null))
+  })
+  countItem = triage.flattenThreads(countFetch.threads, { repo: 'o/n', pr: 13, threads: {} }, countFetch.head)[0]
+} catch (error) { countError = error.message }
+check('fetchThreads: query asks for comments.totalCount', countError === '' && countQuery.indexOf('totalCount') !== -1, countError !== '' ? countError : countQuery.slice(0, 200))
+check('fetchThreads: comment count reports totalCount past the 20-node window', countItem !== null && countItem.comments === 34, countError !== '' ? countError : JSON.stringify(countItem))
+
+// 16. cross-line comments carry line: null; the draft row must not say "path:undefined"
+const nullLineDraft = triage.renderDraft({ repo: 'o/n', number: 14, head: 'h1' }, [{ threadId: 'TN', path: 'a.ts', line: null, body: 'spans several lines' }])
+const nullLine = nullLineDraft.split('\n').filter(line => line.indexOf('a.ts') !== -1).join(' | ')
+check('renderDraft: null line renders the path as multi-line, not :undefined', nullLine.indexOf('undefined') === -1 && nullLine.indexOf(':null') === -1 && nullLine.indexOf('multi-line') !== -1, nullLine)
+
+// 17. --pr and --limit are integers; junk must die at parse time with a readable usage error
+let badPr = ''
+try { triage.parseArgs(['state', '--pr', '7.5']) } catch (error) { badPr = error.message }
+check('parseArgs: non-integer --pr is rejected', badPr.indexOf('--pr') !== -1 && badPr.indexOf('integer') !== -1, badPr === '' ? 'accepted 7.5' : badPr)
+let badLimit = ''
+try { triage.parseArgs(['inbox', '--limit', 'abc']) } catch (error) { badLimit = error.message }
+check('parseArgs: non-integer --limit is rejected', badLimit.indexOf('--limit') !== -1 && badLimit.indexOf('integer') !== -1, badLimit === '' ? 'accepted abc' : badLimit)
+let intParse = ''
+try {
+  const limit = triage.parseArgs(['inbox', '--limit', '5'])
+  const pr = triage.parseArgs(['plan', '--pr', '12'])
+  intParse = limit.options.limit === '5' && pr.options.pr === '12' ? 'ok' : 'value changed'
+} catch (error) { intParse = error.message }
+check('parseArgs: integer --pr/--limit still parse to strings', intParse === 'ok', intParse)
+let fracExit = 0
+let fracStderr = ''
+try {
+  execFileSync(process.execPath, [tool, 'state', '--repo', 'o/n', '--pr', '7.5'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+} catch (error) { fracExit = error.status; fracStderr = error.stderr }
+check('state --pr 7.5 refuses to run', fracExit !== 0 && fracStderr.indexOf('integer') !== -1, 'exit ' + fracExit + ' stderr ' + fracStderr.trim())
+
+// 18. win32 folds path case: the same repo written in two spellings must reuse the one on-disk dir
+if (process.platform !== 'win32') {
+  checks.push('stateFile: case-variant repo spellings reuse the on-disk dir (skipped: not win32)')
+} else {
+  const caseSandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-case-'))
+  const previousCaseHome = process.env.DSH_HOME
+  process.env.DSH_HOME = caseSandbox
+  try {
+    const upper = triage.saveState('Acme/Widget', 5, { repo: 'Acme/Widget', pr: 5, headSha: 'h5', threads: { T1: { verdict: 'fix', reason: 'real' } } })
+    const lower = triage.saveState('acme/widget', 5, { repo: 'acme/widget', pr: 5, headSha: 'h6', threads: { T1: { verdict: 'dismiss', reason: 'nit' } } })
+    const caseDirs = readdirSync(join(caseSandbox, 'review-triage'))
+    check('stateFile: case-variant spellings share one state dir', caseDirs.length === 1 && dirname(lower).toLowerCase() === dirname(upper).toLowerCase(), 'dirs: ' + caseDirs.join(','))
+    const reused = triage.stateFile('ACME/WIDGET', 5)
+    check('stateFile: later calls reuse the on-disk spelling', dirname(reused) === dirname(upper), dirname(reused) + ' vs on-disk ' + dirname(upper))
+    const reread = JSON.parse(readFileSync(reused, 'utf8'))
+    check('stateFile: the reused spelling serves the latest state', reread.threads.T1.verdict === 'dismiss', JSON.stringify(reread.threads))
+  } finally {
+    if (previousCaseHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousCaseHome
+    rmSync(caseSandbox, { recursive: true, force: true })
+  }
+}
+
+// 19. inbox stale: judge against the head fetchThreads just returned, not the older pr-list head
+const staleSandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-stale-'))
+const previousStaleHome = process.env.DSH_HOME
+process.env.DSH_HOME = staleSandbox
+try {
+  // Recorded against the fresh head the GraphQL fetch reports; the pr-list row still carries an older sha.
+  triage.saveState('acme/widget', 7, { repo: 'acme/widget', pr: 7, headSha: 'head-sha', threads: { T1: { verdict: 'fix', reason: 'real', reply: 'r', sha: 'head-sha' } } })
+  const staleLines = []
+  const realLog = console.log
+  console.log = line => staleLines.push(String(line))
+  let staleError = ''
+  try {
+    triage.cmdInbox({ repo: 'acme/widget', limit: '5', json: true }, args => {
+      if (args[0] === 'api') return JSON.stringify(ghPage([injectedThread('T1', [comment('bot', 'x')], [comment('bot', 'x')])], false, null))
+      return JSON.stringify([{ number: 7, title: 't', url: 'u', headRefOid: 'older-list-sha' }])
+    })
+  } catch (error) { staleError = error.message } finally { console.log = realLog }
+  let staleRows = null
+  try { staleRows = staleLines.filter(Boolean).map(line => JSON.parse(line)) } catch { staleRows = null }
+  check('inbox: pending judges against the fetched head, not the pr-list head', staleError === '' && staleRows !== null && staleRows.length === 1 && staleRows[0].open === 1 && staleRows[0].pending === 0, staleError !== '' ? staleError : JSON.stringify(staleRows))
+} finally {
+  if (previousStaleHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousStaleHome
+  rmSync(staleSandbox, { recursive: true, force: true })
+}
+
 for (const line of failures) console.error('FAIL  ' + line)
 if (failures.length > 0) {
   console.error('\n' + failures.length + ' failure(s), ' + checks.length + ' check(s) passed')
   process.exit(1)
 }
-console.log('ok -- ' + checks.length + ' checks: review-triage skill, tool selftest, presets, registration matrix, summary view, manifest, patch, inbox repo passthrough, entry guard, applyReply validation, state lock, apply pending dedupe')
+console.log('ok -- ' + checks.length + ' checks: review-triage skill, tool selftest, presets, registration matrix, summary view, manifest, patch, inbox repo passthrough, entry guard, applyReply validation, state lock, apply pending dedupe, comment totalCount, null-line draft, integer flags, slug case reuse, inbox stale head')
 

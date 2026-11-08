@@ -26,7 +26,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import assert from 'node:assert'
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -43,6 +43,9 @@ function fail(message) {
 const BOOLEAN_FLAGS = ['help', 'yes', 'json', 'all']
 // Flags that carry a value; any other --flag is rejected as unknown.
 const VALUE_FLAGS = ['pr', 'repo', 'thread', 'verdict', 'reason', 'reply', 'out', 'limit']
+// pr/limit are integers; reject fractions and junk at parse time instead of
+// letting a mangled number surface as a confusing gh error later.
+const INTEGER_FLAGS = ['pr', 'limit']
 
 export function parseArgs(argv) {
   if (argv.some(token => token === '-h' || token === '--help')) return { command: 'help', options: {} }
@@ -56,6 +59,7 @@ export function parseArgs(argv) {
     const next = rest[index + 1]
     if (!VALUE_FLAGS.includes(key)) { options[key] = true; continue }
     if (next === undefined || next.slice(0, 2) === '--') throw new Error('--' + key + ' needs a value')
+    if (INTEGER_FLAGS.includes(key) && Number.isInteger(Number(next)) === false) throw new Error('--' + key + ' must be an integer, got: ' + next)
     options[key] = next
     index += 1
   }
@@ -66,10 +70,21 @@ function dshHome() {
   return process.env.DSH_HOME === undefined ? join(homedir(), '.dsh') : process.env.DSH_HOME
 }
 
+// win32 folds directory case, so 'O/N' and 'o/n' are one repo but two slug
+// spellings; reuse the spelling already on disk (the session-transcript
+// fallback scan pattern) instead of letting each spelling create its own dir.
+function resolveSlugCase(slug) {
+  if (process.platform !== 'win32') return slug
+  let names
+  try { names = readdirSync(join(dshHome(), 'review-triage')) } catch { return slug }
+  const match = names.find(name => name.toLowerCase() === slug.toLowerCase())
+  return match === undefined ? slug : match
+}
+
 export function stateFile(repo, pr) {
   const slug = String(repo).replace(/[^A-Za-z0-9._-]+/g, '__')
   if (slug === '.' || slug === '..') throw new Error('unsafe repo slug: ' + String(repo))
-  return join(dshHome(), 'review-triage', slug, 'pr-' + pr + '.json')
+  return join(dshHome(), 'review-triage', resolveSlugCase(slug), 'pr-' + pr + '.json')
 }
 
 function loadState(repo, pr) {
@@ -160,7 +175,7 @@ const THREADS_QUERY = [
   '      reviewThreads(first:100,after:$cursor){',
   '        pageInfo{hasNextPage endCursor}',
   '        nodes{ id isResolved isOutdated path line',
-  '          firstComments:comments(first:20){nodes{author{login} body createdAt url}}',
+  '          firstComments:comments(first:20){totalCount nodes{author{login} body createdAt url}}',
   '          lastComment:comments(last:1){nodes{author{login} body createdAt url}} }',
   '      }',
   '    }',
@@ -200,6 +215,8 @@ export function flattenThreads(threads, state, head) {
   return threads.map(thread => {
     const record = state.threads[thread.id] || {}
     const firstComments = (thread.firstComments && thread.firstComments.nodes) || []
+    // totalCount spans the whole thread; nodes cap at the first:20 window and would under-report.
+    const commentTotal = thread.firstComments && typeof thread.firstComments.totalCount === 'number' ? thread.firstComments.totalCount : firstComments.length
     const first = firstComments[0] || {}
     // lastComment(last:1) is the true final comment even past the 20-comment window.
     const lastNodes = (thread.lastComment && thread.lastComment.nodes) || []
@@ -213,7 +230,7 @@ export function flattenThreads(threads, state, head) {
       outdated: thread.isOutdated === true,
       author: first.author === undefined || first.author === null ? undefined : first.author.login,
       url: first.url,
-      comments: firstComments.length,
+      comments: commentTotal,
       body: typeof first.body === 'string' ? first.body : '',
       lastAuthor: last.author === undefined || last.author === null ? undefined : last.author.login,
       verdict: record.verdict,
@@ -245,7 +262,8 @@ export function renderDraft(pullRequest, items) {
     lines.push('### ' + verdict + ' (' + group.length + ')')
     lines.push('')
     for (const item of group) {
-      const where = item.path === undefined ? '(file unknown)' : item.path + ':' + String(item.line)
+      // Cross-line comments carry line: null; render the path alone instead of "path:undefined".
+      const where = item.path === undefined ? '(file unknown)' : item.line === undefined || item.line === null ? item.path + ' (multi-line)' : item.path + ':' + String(item.line)
       // Surrogate-safe slice; escape ``` so an excerpt can never open an unclosed fence.
       const excerpt = Array.from(item.body.split('\n')[0] || '(empty comment)').slice(0, 160).join('').replace(/```/g, '\\`\\`\\`')
       lines.push('- ' + where + ' -- ' + excerpt)
@@ -264,7 +282,7 @@ export function cmdInbox(options, ghFn = gh) {
   // threads are read from, not whatever repo the cwd happens to point at.
   const repo = resolveRepo(options)
   const limit = options.limit === undefined ? 10 : Number(options.limit)
-  const base = ['pr', 'list', '--repo', repo, '--state', 'open', '--limit', String(limit), '--json', 'number,title,url,headRefOid']
+  const base = ['pr', 'list', '--repo', repo, '--state', 'open', '--limit', String(limit), '--json', 'number,title,url']
   const mine = JSON.parse(ghFn(base.concat(['--author', '@me'])))
   const review = JSON.parse(ghFn(base.concat(['--search', 'review-requested:@me'])))
   const seen = new Set()
@@ -279,7 +297,10 @@ export function cmdInbox(options, ghFn = gh) {
     let threads = []
     try {
       const state = loadState(repo, pr.number)
-      threads = flattenThreads(fetchThreads(repo, pr.number).threads, state, pr.headRefOid)
+      const fetched = fetchThreads(repo, pr.number, ghFn)
+      // Stale compares against the head the GraphQL fetch just saw; the pr-list
+      // row can lag it and would flag fresh verdicts as stale.
+      threads = flattenThreads(fetched.threads, state, fetched.head)
     } catch (error) {
       report.push({ number: pr.number, title: pr.title, error: error.message })
       continue
