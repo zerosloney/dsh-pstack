@@ -26,7 +26,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import assert from 'node:assert'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -86,6 +86,52 @@ export function saveState(repo, pr, state) {
   writeFileSync(temp, JSON.stringify(state, null, 2) + '\n')
   renameSync(temp, file)
   return file
+}
+
+const LOCK_RETRY_MS = 25
+const LOCK_TIMEOUT_MS = 2000
+const LOCK_STALE_MS = 30000
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function stateLockFile(repo, pr) {
+  return stateFile(repo, pr) + '.lock'
+}
+
+// Cross-process mutex for state read-modify-write cycles: record/apply would
+// otherwise run unlocked read -> mutate -> save and last write wins, dropping
+// the other process's verdict. The lock file's existence is the mutex ('wx'
+// fails while a holder's file is there); callers must wrap the whole cycle,
+// not just saveState. A lock older than LOCK_STALE_MS is crash residue and
+// may be preempted; release only unlinks a lock we own (pid check) so a
+// preempted laggard cannot delete its successor's lock.
+export function withStateLock(repo, pr, fn) {
+  const lock = stateLockFile(repo, pr)
+  mkdirSync(dirname(lock), { recursive: true })
+  const deadline = Date.now() + LOCK_TIMEOUT_MS
+  for (;;) {
+    let fd
+    try {
+      fd = openSync(lock, 'wx')
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) throw new Error('state lock held by another review-triage process: ' + lock + '; if no other run is active, delete the stale lock file')
+      let stale = false
+      try { stale = Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS } catch { /* holder released; retry */ }
+      if (stale) {
+        try { unlinkSync(lock) } catch { /* lost the preempt race; retry */ }
+      } else {
+        sleepSync(LOCK_RETRY_MS)
+      }
+      continue
+    }
+    try { writeSync(fd, String(process.pid)) } finally { closeSync(fd) }
+    try { return fn() } finally {
+      try { if (readFileSync(lock, 'utf8') === String(process.pid)) unlinkSync(lock) } catch { /* already gone */ }
+    }
+  }
 }
 
 function gh(args) {
@@ -213,11 +259,14 @@ export function renderDraft(pullRequest, items) {
   return lines.join('\n')
 }
 
-function cmdInbox(options) {
+export function cmdInbox(options, ghFn = gh) {
+  // Resolve first: the pr list itself must target the same repo the state and
+  // threads are read from, not whatever repo the cwd happens to point at.
+  const repo = resolveRepo(options)
   const limit = options.limit === undefined ? 10 : Number(options.limit)
-  const base = ['pr', 'list', '--state', 'open', '--limit', String(limit), '--json', 'number,title,url,headRefOid']
-  const mine = JSON.parse(gh(base.concat(['--author', '@me'])))
-  const review = JSON.parse(gh(base.concat(['--search', 'review-requested:@me'])))
+  const base = ['pr', 'list', '--repo', repo, '--state', 'open', '--limit', String(limit), '--json', 'number,title,url,headRefOid']
+  const mine = JSON.parse(ghFn(base.concat(['--author', '@me'])))
+  const review = JSON.parse(ghFn(base.concat(['--search', 'review-requested:@me'])))
   const seen = new Set()
   const rows = []
   for (const pr of mine.concat(review)) {
@@ -226,7 +275,6 @@ function cmdInbox(options) {
     rows.push(pr)
   }
   const report = []
-  const repo = resolveRepo(options)
   for (const pr of rows) {
     let threads = []
     try {
@@ -266,19 +314,24 @@ function cmdRecord(options) {
   if (typeof options.reason !== 'string' || options.reason.trim() === '') fail('record needs a non-empty --reason')
   const repo = resolveRepo(options)
   const number = Number(options.pr)
-  const state = loadState(repo, number)
   const fetched = fetchThreads(repo, number)
   if (!fetched.threads.some(thread => thread.id === options.thread)) fail('thread not found on ' + repo + '#' + number + ': ' + options.thread)
-  state.headSha = fetched.head
-  state.threads[options.thread] = {
-    verdict: options.verdict,
-    reason: options.reason,
-    reply: typeof options.reply === 'string' ? options.reply : state.threads[options.thread] && state.threads[options.thread].reply,
-    sha: fetched.head,
-    at: new Date().toISOString(),
-    applied: false,
-  }
-  const file = saveState(repo, number, state)
+  let file
+  // The lock spans load -> mutate -> save so a concurrent record/apply cannot
+  // overwrite this verdict with its own last-write-wins snapshot.
+  withStateLock(repo, number, () => {
+    const state = loadState(repo, number)
+    state.headSha = fetched.head
+    state.threads[options.thread] = {
+      verdict: options.verdict,
+      reason: options.reason,
+      reply: typeof options.reply === 'string' ? options.reply : state.threads[options.thread] && state.threads[options.thread].reply,
+      sha: fetched.head,
+      at: new Date().toISOString(),
+      applied: false,
+    }
+    file = saveState(repo, number, state)
+  })
   console.log('recorded ' + options.verdict + ' for ' + options.thread + ' -> ' + file)
 }
 
@@ -298,7 +351,7 @@ function cmdDraft(options) {
   process.stdout.write(markdown + '\n')
 }
 
-function applyReply(threadId, body) {
+export function applyReply(threadId, body, ghFn = gh) {
   const mutation = [
     'mutation($thread:ID!,$body:String!){',
     '  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){',
@@ -306,7 +359,15 @@ function applyReply(threadId, body) {
     '  }',
     '}',
   ].join('\n')
-  return JSON.parse(gh(['api', 'graphql', '-f', 'query=' + mutation, '-f', 'thread=' + threadId, '-f', 'body=' + body]))
+  const parsed = JSON.parse(ghFn(['api', 'graphql', '-f', 'query=' + mutation, '-f', 'thread=' + threadId, '-f', 'body=' + body]))
+  const comment = parsed && parsed.data && parsed.data.addPullRequestReviewThreadReply && parsed.data.addPullRequestReviewThreadReply.comment
+  if (comment === null || comment === undefined) {
+    // gh can exit 0 while the mutation failed; a body without the comment means
+    // nothing was posted, so fail closed instead of flagging the thread applied.
+    const excerpt = Array.isArray(parsed && parsed.errors) && parsed.errors.length > 0 ? { errors: parsed.errors } : (parsed && parsed.data)
+    throw new Error('addPullRequestReviewThreadReply did not return a comment for thread ' + threadId + ', got: ' + JSON.stringify(excerpt === undefined ? null : excerpt))
+  }
+  return parsed
 }
 
 function applyResolve(threadId) {
@@ -326,9 +387,19 @@ function applyResolve(threadId) {
 export function runApply({ repo, number, head, items, state, postReply, postResolve, save }) {
   state.headSha = head
   for (const item of items) {
+    // Crash safety: persist a pending marker BEFORE the reply goes out. If a run
+    // dies between posting and saving, the marker is what stops the rerun from
+    // posting the same reply twice.
+    const record = state.threads[item.threadId]
+    if (record !== undefined && record.pending === true) {
+      console.error('apply: thread ' + item.threadId + ' is still marked pending from an earlier run; the reply may already have been posted -- verify manually, then clear the marker to retry')
+      continue
+    }
+    state.threads[item.threadId] = Object.assign({}, state.threads[item.threadId], { pending: true, pendingAt: new Date().toISOString() })
+    save(repo, number, state)
     postReply(item.threadId, item.reply)
     if (item.verdict !== 'ask') postResolve(item.threadId)
-    state.threads[item.threadId] = Object.assign({}, state.threads[item.threadId], { applied: true, appliedAt: new Date().toISOString(), appliedSha: head })
+    state.threads[item.threadId] = Object.assign({}, state.threads[item.threadId], { applied: true, appliedAt: new Date().toISOString(), appliedSha: head, pending: false })
     save(repo, number, state)
     console.log('applied ' + item.threadId + ' (' + String(item.path) + ':' + String(item.line) + ')')
   }
@@ -341,18 +412,22 @@ function cmdApply(options) {
   const repo = resolveRepo(options)
   const number = Number(options.pr)
   const fetched = fetchThreads(repo, number)
-  const state = loadState(repo, number)
-  const items = flattenThreads(fetched.threads, state, fetched.head)
-  const targets = items.filter(item => {
-    if (item.resolved === true) return false
-    if (options.thread !== undefined && item.threadId !== options.thread) return false
-    if (item.applied === true) return false
-    if (item.stale === true) return false
-    if (typeof item.reply !== 'string' || item.reply.trim() === '') return false
-    return true
+  // One lock across load -> post -> save: a concurrent apply must neither
+  // double-post a reply nor clobber the other run's applied markers.
+  withStateLock(repo, number, () => {
+    const state = loadState(repo, number)
+    const items = flattenThreads(fetched.threads, state, fetched.head)
+    const targets = items.filter(item => {
+      if (item.resolved === true) return false
+      if (options.thread !== undefined && item.threadId !== options.thread) return false
+      if (item.applied === true) return false
+      if (item.stale === true) return false
+      if (typeof item.reply !== 'string' || item.reply.trim() === '') return false
+      return true
+    })
+    if (targets.length === 0) { console.log('nothing to apply'); return }
+    runApply({ repo, number, head: fetched.head, items: targets, state, postReply: applyReply, postResolve: applyResolve, save: saveState })
   })
-  if (targets.length === 0) { console.log('nothing to apply'); return }
-  runApply({ repo, number, head: fetched.head, items: targets, state, postReply: applyReply, postResolve: applyResolve, save: saveState })
 }
 
 function cmdState(options) {
@@ -406,7 +481,8 @@ function selftest() {
     assert.deepEqual(calls.resolves, ['T1'], 'ask threads are answered but not resolved')
     assert.equal(applyState.threads.T1.applied, true)
     assert.equal(applyState.threads.T2.applied, true)
-    assert.equal(calls.saves, 2)
+    assert.equal(applyState.threads.T1.pending, false)
+    assert.equal(calls.saves, 4)
     assert.equal(applyState.headSha, 'bbb')
     console.log('selftest ok: flatten, stale detection, draft rendering, state round-trip, apply engine, parseArgs')
   } finally {
@@ -441,7 +517,7 @@ function main() {
   fail('unknown command: ' + command + '\n' + HELP)
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try { main() } catch (error) { fail(error.message) }
 }
 

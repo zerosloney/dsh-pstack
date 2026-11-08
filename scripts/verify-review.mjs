@@ -2,7 +2,7 @@
 /** Gate for the review-triage capability: skill contract, tool selftest, presets, summary view. */
 import assert from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -170,6 +170,7 @@ const applyState = { repo: 'o/n', pr: 7, headSha: undefined, threads: { T1: { ve
 const posted = []
 const resolved = []
 const savedSnapshots = []
+let t1DoneWhenT2Posted = null
 let applyError
 try {
   triage.runApply({
@@ -179,27 +180,80 @@ try {
       { threadId: 'T2', path: 'b.ts', line: 9, verdict: 'fix', reply: 'r2' },
     ],
     state: applyState,
-    postReply: threadId => { posted.push(threadId); if (threadId === 'T2') throw new Error('gh down') },
+    postReply: threadId => {
+      posted.push(threadId)
+      if (threadId === 'T2') t1DoneWhenT2Posted = applyState.threads.T1.applied === true && applyState.threads.T1.pending === false
+      if (threadId === 'T2') throw new Error('gh down')
+    },
     postResolve: threadId => resolved.push(threadId),
-    save: (repo, number, state) => savedSnapshots.push({ repo, number, first: state.threads.T1.applied === true, second: state.threads.T2.applied === true }),
+    save: (repo, number, state) => savedSnapshots.push({ repo, number, first: state.threads.T1.applied === true, firstPending: state.threads.T1.pending === true, second: state.threads.T2.applied === true, secondPending: state.threads.T2.pending === true }),
   })
 } catch (error) { applyError = error }
 check('runApply: post failure reaches the caller', applyError !== undefined && applyError.message === 'gh down', applyError === undefined ? 'no error' : applyError.message)
-check('runApply: saves once, right after the first thread', savedSnapshots.length === 1 && savedSnapshots[0].first === true && savedSnapshots[0].second === false, JSON.stringify(savedSnapshots))
-check('runApply: first thread persisted before the second was posted', posted.join(',') === 'T1,T2' && savedSnapshots.length === 1, 'posted ' + posted.join(',') + ' saved ' + savedSnapshots.length)
-check('runApply: state keeps applied on T1 only', applyState.threads.T1.applied === true && applyState.threads.T2.applied === undefined && applyState.headSha === applyHead)
-const resumed = []
+check('runApply: pending is persisted before each reply is posted', savedSnapshots.length === 3 && savedSnapshots[0].firstPending === true && savedSnapshots[0].first === false && savedSnapshots[1].first === true && savedSnapshots[1].firstPending === false && savedSnapshots[2].secondPending === true, JSON.stringify(savedSnapshots))
+check('runApply: first thread fully applied before the second reply is posted', t1DoneWhenT2Posted === true && savedSnapshots[1].first === true, 'posted ' + posted.join(',') + ' saved ' + JSON.stringify(savedSnapshots))
+check('runApply: crash leaves T1 applied and T2 pending, never applied', applyState.threads.T1.applied === true && applyState.threads.T1.pending === false && applyState.threads.T2.applied === undefined && applyState.threads.T2.pending === true && applyState.headSha === applyHead, JSON.stringify(applyState.threads))
+// A pending marker means the earlier run may have already sent the reply, so the
+// rerun must skip the thread and hand it to a human instead of re-posting blindly.
+const rerunWarnings = []
+const realConsoleError = console.error
+console.error = line => rerunWarnings.push(String(line))
+const rerunPosts = []
+let rerunError
 try {
   triage.runApply({
     repo: 'o/n', number: 7, head: applyHead,
     items: [{ threadId: 'T2', path: 'b.ts', line: 9, verdict: 'fix', reply: 'r2' }],
     state: applyState,
-    postReply: threadId => { posted.push(threadId); resumed.push(threadId) },
+    postReply: threadId => rerunPosts.push(threadId),
+    postResolve: threadId => resolved.push(threadId),
+    save: () => {},
+  })
+} catch (error) { rerunError = error } finally { console.error = realConsoleError }
+check('runApply: rerun skips a pending thread, warns, and never re-posts', rerunError === undefined && rerunPosts.length === 0 && rerunWarnings.join('\n').indexOf('T2') !== -1 && rerunWarnings.join('\n').indexOf('verify manually') !== -1 && applyState.threads.T2.applied === undefined, JSON.stringify(rerunWarnings))
+// Once a human verified the reply never landed and cleared the marker, the rerun finishes T2 without repeating T1.
+delete applyState.threads.T2.pending
+const clearedPosts = []
+try {
+  triage.runApply({
+    repo: 'o/n', number: 7, head: applyHead,
+    items: [{ threadId: 'T2', path: 'b.ts', line: 9, verdict: 'fix', reply: 'r2' }],
+    state: applyState,
+    postReply: threadId => { posted.push(threadId); clearedPosts.push(threadId) },
     postResolve: threadId => resolved.push(threadId),
     save: () => {},
   })
 } catch (error) { applyError = error }
-check('runApply: rerun finishes T2 without repeating T1', resumed.join(',') === 'T2' && posted.filter(id => id === 'T1').length === 1 && applyState.threads.T2.applied === true && resolved.join(',') === 'T1,T2', 'posted ' + posted.join(','))
+check('runApply: cleared marker lets the rerun finish T2 without repeating T1', clearedPosts.join(',') === 'T2' && posted.filter(id => id === 'T1').length === 1 && applyState.threads.T2.applied === true && applyState.threads.T2.pending === false && resolved.join(',') === 'T1,T2', 'posted ' + posted.join(','))
+// Reply succeeds, resolve fails: the pending marker must survive so the rerun skips the re-post.
+const pendState = { repo: 'o/n', pr: 9, headSha: undefined, threads: { T9: { verdict: 'fix', reason: 'real', reply: 'r9', sha: 'h9' } } }
+const pendPosts = []
+let pendError
+try {
+  triage.runApply({
+    repo: 'o/n', number: 9, head: 'h9',
+    items: [{ threadId: 'T9', path: 'a.ts', line: 1, verdict: 'fix', reply: 'r9' }],
+    state: pendState,
+    postReply: threadId => pendPosts.push(threadId),
+    postResolve: () => { throw new Error('resolve down') },
+    save: () => {},
+  })
+} catch (error) { pendError = error }
+check('runApply: pending marker survives a resolve failure after the reply', pendError !== undefined && pendError.message === 'resolve down' && pendPosts.length === 1 && pendState.threads.T9.pending === true && pendState.threads.T9.applied !== true, pendError === undefined ? 'no error' : pendError.message + ' / ' + JSON.stringify(pendState.threads.T9))
+const pendWarnings = []
+console.error = line => pendWarnings.push(String(line))
+let pendRerunError
+try {
+  triage.runApply({
+    repo: 'o/n', number: 9, head: 'h9',
+    items: [{ threadId: 'T9', path: 'a.ts', line: 1, verdict: 'fix', reply: 'r9' }],
+    state: pendState,
+    postReply: threadId => pendPosts.push(threadId),
+    postResolve: () => {},
+    save: () => {},
+  })
+} catch (error) { pendRerunError = error } finally { console.error = realConsoleError }
+check('runApply: second run after a resolve failure re-posts nothing and warns', pendRerunError === undefined && pendPosts.length === 1 && pendWarnings.join('\n').indexOf('T9') !== -1, 'posted ' + pendPosts.length + ' warned ' + JSON.stringify(pendWarnings))
 const askState = { repo: 'o/n', pr: 8, threads: {} }
 const askCalls = { reply: 0, resolve: 0, saves: 0 }
 let askError
@@ -215,7 +269,7 @@ try {
 } catch (error) { askError = error }
 check('runApply: ask replies without resolving', askError === undefined && askCalls.reply === 1 && askCalls.resolve === 0, askError === undefined ? JSON.stringify(askCalls) : askError.message)
 const t3 = askState.threads.T3 || {}
-check('runApply: ask still records applied', t3.applied === true && askCalls.saves === 1, JSON.stringify(t3))
+check('runApply: ask still records applied and clears pending', t3.applied === true && t3.pending === false && askCalls.saves === 2, JSON.stringify(t3))
 let applyExit = 0
 let applyStderr = ''
 try {
@@ -329,10 +383,98 @@ const emojiLine = triage.renderDraft({ repo: 'o/n', number: 11, head: 'h1' }, [{
   .find(line => line.indexOf('b.ts') !== -1)
 check('renderDraft: excerpt slicing is surrogate-safe', typeof emojiLine === 'string' && emojiLine.endsWith('\u{1F600}') && emojiLine.indexOf('\uFFFD') === -1, String(emojiLine))
 
+// 11. inbox: the pr list calls must target the resolved repo, not whatever repo cwd points at
+let inboxCalls = []
+let inboxError = ''
+try {
+  triage.cmdInbox({ repo: 'acme/widget', limit: '5', json: true }, args => { inboxCalls.push(args.join(' ')); return '[]' })
+} catch (error) { inboxError = error.message }
+const inboxList = inboxCalls.filter(line => line.indexOf('pr list') === 0)
+check('inbox: pr list carries the resolved --repo', inboxError === '' && inboxList.length === 2 && inboxList.every(line => line.indexOf('--repo acme/widget') !== -1), inboxError !== '' ? inboxError : JSON.stringify(inboxCalls))
+
+// 12. entry guard: argv[1] keeps the link path while import.meta.url is the real path,
+//     so the script must still run when invoked through a junction (win32) / symlink (posix)
+const linkSandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-entry-'))
+try {
+  let linkedTool = null
+  try {
+    if (process.platform === 'win32') {
+      const junctionDir = join(linkSandbox, 'scripts')
+      symlinkSync(join(ROOT, 'scripts'), junctionDir, 'junction')
+      linkedTool = join(junctionDir, 'review-triage.mjs')
+    } else {
+      linkedTool = join(linkSandbox, 'review-triage.mjs')
+      symlinkSync(tool, linkedTool, 'file')
+    }
+  } catch { linkedTool = null }
+  if (linkedTool === null) {
+    checks.push('entry guard: runs through a junction/symlink (skipped: links unavailable here)')
+  } else {
+    let linkedHelp = ''
+    let linkedExit = 0
+    try {
+      linkedHelp = execFileSync(process.execPath, [linkedTool, 'help'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) { linkedExit = error.status; linkedHelp = typeof error.stdout === 'string' ? error.stdout : '' }
+    check('entry guard: runs through a junction/symlink', linkedExit === 0 && linkedHelp.indexOf('review-triage <command>') !== -1, 'exit ' + linkedExit + ' stdout ' + JSON.stringify(linkedHelp.slice(0, 60)))
+  }
+} finally {
+  rmSync(linkSandbox, { recursive: true, force: true })
+}
+
+// 13. applyReply: a 200 body that carries GraphQL errors must fail closed instead of flagging applied
+let replyError = ''
+try {
+  triage.applyReply('T7', 'the race is real', () => JSON.stringify({ data: null, errors: [{ message: 'Thread not found: T7', type: 'NOT_FOUND' }] }))
+} catch (error) { replyError = error.message }
+check('applyReply: GraphQL errors in the body fail closed', replyError.indexOf('addPullRequestReviewThreadReply') !== -1 && replyError.indexOf('Thread not found: T7') !== -1, replyError === '' ? 'no error raised' : replyError)
+const errState = { repo: 'o/n', pr: 12, headSha: undefined, threads: { TE: { verdict: 'fix', reason: 'real', reply: 'r', sha: 'h' } } }
+let errApply = ''
+try {
+  triage.runApply({
+    repo: 'o/n', number: 12, head: 'h',
+    items: [{ threadId: 'TE', path: 'a.ts', line: 1, verdict: 'fix', reply: 'r' }],
+    state: errState,
+    postReply: (threadId, body) => triage.applyReply(threadId, body, () => JSON.stringify({ data: null, errors: [{ message: 'comment rejected' }] })),
+    postResolve: () => {},
+    save: () => {},
+  })
+} catch (error) { errApply = error.message }
+check('applyReply: errors body keeps the thread unapplied', errApply.indexOf('addPullRequestReviewThreadReply') !== -1 && errState.threads.TE.applied !== true, errApply === '' ? 'no error raised' : errApply)
+
+// 14. state lock: stale lockfiles are preempted, contended locks time out loudly, releases are pid-checked
+const lockSandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-lock-'))
+const previousLockHome = process.env.DSH_HOME
+process.env.DSH_HOME = lockSandbox
+try {
+  const lockPath = triage.stateFile('o/n', 21) + '.lock'
+  mkdirSync(dirname(lockPath), { recursive: true })
+  let preemptRan = false
+  let preemptError = ''
+  try {
+    writeFileSync(lockPath, '424242')
+    utimesSync(lockPath, new Date(Date.now() - 60000), new Date(Date.now() - 60000))
+    triage.withStateLock('o/n', 21, () => { preemptRan = existsSync(lockPath) })
+  } catch (error) { preemptError = error.message }
+  check('stateLock: stale lockfile is preempted', preemptError === '' && preemptRan === true && existsSync(lockPath) === false, preemptError !== '' ? preemptError : 'ran ' + preemptRan + ', lock remains ' + existsSync(lockPath))
+  let contendedError = ''
+  const contendedStart = Date.now()
+  try {
+    writeFileSync(lockPath, '424242')
+    triage.withStateLock('o/n', 21, () => {})
+  } catch (error) { contendedError = error.message }
+  check('stateLock: contended lock times out naming the lock file', contendedError.indexOf('state lock') !== -1 && contendedError.indexOf(lockPath) !== -1, contendedError === '' ? 'no error raised' : contendedError)
+  check('stateLock: contention retries before giving up', Date.now() - contendedStart >= 1500, 'waited ' + (Date.now() - contendedStart) + 'ms')
+  check('stateLock: a foreign lockfile survives the timeout', existsSync(lockPath) === true, 'lock was removed by the timed-out waiter')
+} finally {
+  if (previousLockHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousLockHome
+  rmSync(lockSandbox, { recursive: true, force: true })
+}
+
 for (const line of failures) console.error('FAIL  ' + line)
 if (failures.length > 0) {
   console.error('\n' + failures.length + ' failure(s), ' + checks.length + ' check(s) passed')
   process.exit(1)
 }
-console.log('ok -- ' + checks.length + ' checks: review-triage skill, tool selftest, presets, registration matrix, summary view, manifest, patch')
+console.log('ok -- ' + checks.length + ' checks: review-triage skill, tool selftest, presets, registration matrix, summary view, manifest, patch, inbox repo passthrough, entry guard, applyReply validation, state lock, apply pending dedupe')
 
