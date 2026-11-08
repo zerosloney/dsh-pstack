@@ -36,71 +36,92 @@ check('skill degrades ask when unattended', skillText.indexOf('## Unattended run
 
 // 2. tool selftest
 const tool = join(ROOT, 'scripts', 'review-triage.mjs')
-const selftest = execFileSync(process.execPath, [tool, 'selftest'], { encoding: 'utf8' })
-check('review-triage selftest', selftest.indexOf('selftest ok') !== -1, selftest.trim())
+let selftest = ''
+let selftestFailure = ''
+try {
+  selftest = execFileSync(process.execPath, [tool, 'selftest'], { encoding: 'utf8' })
+} catch (error) {
+  // A failing selftest used to surface as a raw child-error dump; report the
+  // child's own stderr tail so the broken assertion is readable in the FAIL line.
+  selftestFailure = typeof error.stderr === 'string' && error.stderr !== '' ? error.stderr : String(error.stdout ?? '')
+}
+check('review-triage selftest', selftest.indexOf('selftest ok') !== -1,
+  selftestFailure !== '' ? 'selftest stderr tail: ' + selftestFailure.trim().slice(-400) : selftest.trim())
 const help = execFileSync(process.execPath, [tool, 'help'], { encoding: 'utf8' })
 for (const command of ['inbox', 'plan', 'record', 'draft', 'apply', 'state']) {
   check('review-triage lists ' + command, help.indexOf(command) !== -1)
 }
 
 // 3. presets
-const { buildReviewPresets } = await import(pathToFileURL(join(ROOT, 'presets-review.mjs')).href)
-const reviewPresets = buildReviewPresets({ root: ROOT })
-check('two review presets', reviewPresets.length === 2)
-const byId = new Map(reviewPresets.map(preset => [preset.id, preset]))
-const flatten = rows => rows.flatMap(row => row.group === true ? flatten(row.config) : [row])
-const proposeFs = flatten(byId.get('review-triage').plugins).find(row => row.id === 'tool-fs')
-const applyFs = flatten(byId.get('review-triage-apply').plugins).find(row => row.id === 'tool-fs')
-check('propose has no write tool', proposeFs.config.write === false && proposeFs.config.edit === false)
-check('apply has write tools', applyFs.config.write === undefined || applyFs.config.write === true)
-for (const preset of reviewPresets) {
-  const rows = flatten(preset.plugins)
-  check(preset.id + ': unique ids', new Set(rows.map(row => row.id)).size === rows.length)
-  check(preset.id + ': shipped scopes', rows.every(row => row.name === 'cordis:group' || row.name.indexOf('@deepseek-ai/') === 0))
-  const persona = rows.find(row => row.id === 'persona')
-  check(preset.id + ': persona points at the skill', persona.config.prefix.indexOf(join(ROOT, 'skills', 'review-triage', 'SKILL.md')) !== -1)
+const presetsReviewPath = join(ROOT, 'presets-review.mjs')
+if (!existsSync(presetsReviewPath)) {
+  fail('presets-review.mjs: missing — preset checks cannot run')
+} else {
+  const { buildReviewPresets } = await import(pathToFileURL(presetsReviewPath).href)
+  const reviewPresets = buildReviewPresets({ root: ROOT })
+  check('two review presets', reviewPresets.length === 2)
+  const byId = new Map(reviewPresets.map(preset => [preset.id, preset]))
+  const flatten = rows => rows.flatMap(row => row.group === true ? flatten(row.config) : [row])
+  const proposeFs = flatten(byId.get('review-triage').plugins).find(row => row.id === 'tool-fs')
+  const applyFs = flatten(byId.get('review-triage-apply').plugins).find(row => row.id === 'tool-fs')
+  check('propose has no write tool', proposeFs.config.write === false && proposeFs.config.edit === false)
+  check('apply has write tools', applyFs.config.write === undefined || applyFs.config.write === true)
+  for (const preset of reviewPresets) {
+    const rows = flatten(preset.plugins)
+    check(preset.id + ': unique ids', new Set(rows.map(row => row.id)).size === rows.length)
+    check(preset.id + ': shipped scopes', rows.every(row => row.name === 'cordis:group' || row.name.indexOf('@deepseek-ai/') === 0))
+    const persona = rows.find(row => row.id === 'persona')
+    check(preset.id + ': persona points at the skill', persona.config.prefix.indexOf(join(ROOT, 'skills', 'review-triage', 'SKILL.md')) !== -1)
+  }
 }
 
 // 4. index registration matrix
-const plugin = await import(pathToFileURL(join(ROOT, 'index.js')).href)
-function stubContext() {
-  const sections = []
-  const registrations = []
-  const pending = []
-  const registry = {
-    async list() { return registrations.map(definition => ({ id: definition.id })) },
-    async register(definition) { registrations.push(definition); return async () => {} },
+const pluginEntry = join(ROOT, 'index.js')
+if (!existsSync(pluginEntry)) {
+  fail('index.js: missing — registration checks cannot run')
+} else {
+  const plugin = await import(pathToFileURL(pluginEntry).href)
+  function stubContext() {
+    const sections = []
+    const registrations = []
+    const pending = []
+    const registry = {
+      async list() { return registrations.map(definition => ({ id: definition.id })) },
+      async register(definition) { registrations.push(definition); return async () => {} },
+    }
+    const ctx = {
+      sections,
+      registrations,
+      systemPrompt: { section: section => { sections.push(section); return () => {} } },
+      effect: () => {},
+      get: key => (key === 'agentPresets' ? registry : undefined),
+      // The registry service arrives after this plugin activates, so the real
+      // plugin waits for it through ctx.inject.
+      inject: (services, callback) => {
+        if (!services.includes('agentPresets')) return undefined
+        pending.push(Promise.resolve(callback(ctx)))
+      },
+      settled: async () => { await Promise.all(pending) },
+    }
+    return ctx
   }
-  const ctx = {
-    sections,
-    registrations,
-    systemPrompt: { section: section => { sections.push(section); return () => {} } },
-    effect: () => {},
-    get: key => (key === 'agentPresets' ? registry : undefined),
-    // The registry service arrives after this plugin activates, so the real
-    // plugin waits for it through ctx.inject.
-    inject: (services, callback) => {
-      if (!services.includes('agentPresets')) return undefined
-      pending.push(Promise.resolve(callback(ctx)))
-    },
-    settled: async () => { await Promise.all(pending) },
+  /** Apply the plugin and wait for its deferred preset registration. */
+  async function applyPlugin(ctx, config) {
+    await plugin.apply(ctx, config)
+    await ctx.settled()
   }
-  return ctx
+  const off = stubContext()
+  await applyPlugin(off, { enabled: false })
+  check('apply preset stays off by default', off.registrations.map(d => d.id).join(',') === 'poteto-agent,comment-sicko,pstack,review-triage')
+  const on = stubContext()
+  await applyPlugin(on, { enabled: false, reviewTriage: { apply: true } })
+  check('apply preset registers when enabled', on.registrations.map(d => d.id).join(',').indexOf('review-triage-apply') !== -1)
+  let rejected
+  try { await applyPlugin(stubContext(), { reviewTriage: { apply: 'yes' } }) } catch (e) { rejected = e }
+  check('config rejects a non-boolean apply',
+    rejected instanceof TypeError && rejected.message === 'pstack-router: config.reviewTriage.apply must be a boolean',
+    rejected === undefined ? 'no error raised' : String(rejected))
 }
-/** Apply the plugin and wait for its deferred preset registration. */
-async function applyPlugin(ctx, config) {
-  await plugin.apply(ctx, config)
-  await ctx.settled()
-}
-const off = stubContext()
-await applyPlugin(off, { enabled: false })
-check('apply preset stays off by default', off.registrations.map(d => d.id).join(',') === 'poteto-agent,comment-sicko,pstack,review-triage')
-const on = stubContext()
-await applyPlugin(on, { enabled: false, reviewTriage: { apply: true } })
-check('apply preset registers when enabled', on.registrations.map(d => d.id).join(',').indexOf('review-triage-apply') !== -1)
-let rejected = false
-try { await applyPlugin(stubContext(), { reviewTriage: { apply: 'yes' } }) } catch { rejected = true }
-check('config rejects a non-boolean apply', rejected)
 
 // 5. summary view against a fixture log
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-summary-'))
@@ -144,10 +165,17 @@ try {
 }
 
 // 6. manifest and patch
-const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+const manifestPath = join(ROOT, 'package.json')
+check('manifest: package.json exists', existsSync(manifestPath))
+const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { files: [], scripts: {} }
 check('manifest: presets-review.mjs shipped', manifest.files.indexOf('presets-review.mjs') !== -1)
-check('manifest: test runs both gates', manifest.scripts.test.indexOf('verify-review.mjs') !== -1)
-const patch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
+check('manifest: test runs both gates',
+  manifest.scripts.test !== undefined
+  && manifest.scripts.test.indexOf('verify.mjs') !== -1
+  && manifest.scripts.test.indexOf('verify-review.mjs') !== -1)
+const patchPath = join(ROOT, 'cordis.patch.yml')
+check('patch: cordis.patch.yml exists', existsSync(patchPath))
+const patch = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
 check('patch: reviewTriage switch present', patch.indexOf('reviewTriage:') !== -1 && patch.indexOf('apply: false') !== -1)
 
 // 7. apply engine: parseArgs strictness and runApply persistence timing
@@ -356,7 +384,7 @@ try {
 
   let dotdot = ''
   try { triage.stateFile('..', 42) } catch (error) { dotdot = error.message }
-  check('stateFile: ".." slug rejected', dotdot !== '' && dotdot.indexOf('..') !== -1, dotdot === '' ? 'accepted' : dotdot)
+  check('stateFile: ".." slug rejected', dotdot === 'unsafe repo slug: ..', dotdot === '' ? 'accepted' : dotdot)
 
   let dot = ''
   try { triage.stateFile('.', 42) } catch (error) { dot = error.message }

@@ -76,12 +76,13 @@ function parseArgs(argv) {
   return options
 }
 
-/** Tool output never belongs to the byte contract. */
+/** Tool output never belongs to the byte contract; only at the repo root's first level. */
 const SKIP = new Set(['.git', '.metrics', 'target'])
 
-function walk(dir, base = dir, out = new Map()) {
+/** Path-to-absolute map of the tree; SKIP names are honored only at the first level. */
+export function walk(dir, base = dir, out = new Map()) {
   for (const name of readdirSync(dir)) {
-    if (SKIP.has(name)) continue
+    if (dir === base && SKIP.has(name)) continue
     const abs = join(dir, name)
     if (statSync(abs).isDirectory()) walk(abs, base, out)
     else out.set(relative(base, abs).split(sep).join('/'), abs)
@@ -129,7 +130,7 @@ function main() {
   section('stale expectation, upstream no longer has the file', result.staleMissing)
   section('stale expectation, file restored despite expectedMissing', result.staleRestored)
   section('stale expectation, file matches upstream now', result.staleIdentical)
-  console.log(`\nextra in the port, informational (${result.extra.length})`)
+  section('extra in the port, informational', result.extra)
 
   if (result.failed > 0) {
     console.error('\nFAIL: the byte contract changed. Rebase the port or update the expectation lists in this file.')

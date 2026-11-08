@@ -94,6 +94,7 @@
 | 文件 | 改动 | 理由 |
 | --- | --- | --- |
 | `skills/poteto-mode/SKILL.md` | 正文第 11 行后插入 3 行（1 段） | 主剧本是入口，模型必须知道 Cursor 名字要按适配表翻译，否则会去找不存在的 `Task` / `subagent_type` / `~/.cursor/plugins` |
+| `.gitignore` | 在通用忽略项（依赖、构建产物、日志、环境与编辑器文件等）之外，追加面向本仓库的两条：`target/`、`.metrics/`（文件尾注明为质量闸门输出） | 本仓库的质量闸门/度量流程会在仓库根产生这两类本地产物，上游 checkout 没有对应条目，故与上游内容不同 |
 | 无其他技能改动 | — | 64 个技能文件、2 份代理、11 章指南、12 个自动化文件逐字节等于上游 v0.15.36 |
 
 另外 `README.md` 被替换为中文打包说明（安装、配置项、依赖、目录、验证），上游原文的 Cursor 安装段与 marketplace 说明对本移植不适用；上游 `plugin.json`、`.cursor-plugin/plugin.json`、`assets/logo.png` 未携带，理由见 §1。
@@ -108,7 +109,7 @@
 | `router.md` | 会话路由指令（等价上游 session-start 上下文） |
 | `cordis.patch.yml` | bundle 补丁：插两行 + 把新会话默认预设指向 `pstack` |
 | `scripts/session-transcript.mjs` | transcript 替换物：按 cwd 推 slug、按帧解 zstd |
-| `scripts/verify.mjs` | 静态 + 单测闸门（390 项） |
+| `scripts/verify.mjs` | 静态 + 单测闸门（405 项） |
 | `scripts/sync-upstream.mjs` | 上游逐字节闸门：报出意外漂移与过期期望（需本地 checkout） |
 | `docs/harness/deepseek-harness.md` | Cursor → DSH 对照表 |
 | `automations/benny/dsh-scheduled-tasks.md` | Automations → `schedule_create` 映射 |
@@ -145,8 +146,8 @@
 | 2 | 装载状态 | pstack-router / pstack-skills 均 active |
 | 3 | 技能目录 | setup-pstack 描述已是上游 0.15.36 原文，证明 customSkillDirs 压过 ~/.agents |
 | 4 | 隐藏语义 | skill poteto-mode 报 not available for model invocation；未知名字报 unknown — 两句不同即证明前者在册 |
-| 5 | 静态闸门 | node scripts/verify.mjs：390 项 |
-| 6 | 评审闸门 | node scripts/verify-review.mjs：72 项 |
+| 5 | 静态闸门 | node scripts/verify.mjs：405 项 |
+| 6 | 评审闸门 | node scripts/verify-review.mjs：85 项 |
 | 7 | 预设 config 对真 schema | 用 profile 内真实包逐个跑 Config：37 个通过，0 失败 |
 | 8 | 委派能力 | spawn 的 capabilities.agentPreset=true；fork=false，故 fork 不带白名单 |
 | 9 | 真实会话日志 | 1.42 MB / 698 帧 → 1263 行，100% 可 JSON.parse |

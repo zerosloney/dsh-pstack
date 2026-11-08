@@ -6,7 +6,7 @@
  * be checked before installing: the skill frontmatter contract DSH's filesystem
  * provider enforces, the adapter wiring, and the router plugin's behavior.
  */
-import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, utimesSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -20,6 +20,7 @@ const ROOT = process.env.PSTACK_ROOT === undefined
   : resolve(process.env.PSTACK_ROOT)
 const failures = []
 const checks = []
+const skipped = { count: 0 }
 
 function check(name, condition, detail = '') {
   if (condition) { checks.push(name); return }
@@ -30,13 +31,13 @@ function fail(message) {
   failures.push(message)
 }
 
-/** Parse the leading `---` block into top-level scalar keys. */
+/** Parse the leading `---` block, collecting every key-like line (indented keys included). */
 function frontmatter(text, label) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
   if (match === null) { fail(`${label}: missing frontmatter`); return undefined }
   const data = {}
   for (const line of match[1].split(/\r?\n/)) {
-    const entry = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line)
+    const entry = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line)
     if (entry === null) continue
     let value = entry[2].trim()
     if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1)
@@ -51,7 +52,22 @@ function frontmatter(text, label) {
 const SKILLS = join(ROOT, 'skills')
 const LEGACY_KEYS = ['disableModelInvocation', 'modelInvocable', 'userInvocable']
 const skillNames = new Set()
-const skillDirs = readdirSync(SKILLS, { withFileTypes: true }).filter(entry => entry.isDirectory())
+const skillDirs = existsSync(SKILLS)
+  ? readdirSync(SKILLS, { withFileTypes: true }).filter(entry => entry.isDirectory())
+  : (fail('skills/: missing — skill checks cannot run'), [])
+
+// The legacy-key contract must see the complete key set: a key on an indented or
+// otherwise non-top-level line still belongs to the frontmatter and must be
+// collected, or the check below would pass a document it should have flagged.
+const syntheticLegacy = frontmatter('---\nname: probe\ndescription: x\n  disableModelInvocation: true\nnormal-key: fine\n---', 'synthetic legacy probe')
+check('frontmatter: parser collects indented legacy keys',
+  syntheticLegacy?.disableModelInvocation === 'true' && LEGACY_KEYS.some(key => key in syntheticLegacy),
+  JSON.stringify(syntheticLegacy))
+const syntheticNormal = frontmatter('---\nname: probe\ndescription: y\nnormal-key: fine\n---', 'synthetic normal probe')
+check('frontmatter: normal keys parse unchanged',
+  syntheticNormal?.name === 'probe' && syntheticNormal?.description === 'y' && syntheticNormal?.['normal-key'] === 'fine'
+  && !LEGACY_KEYS.some(key => key in syntheticNormal),
+  JSON.stringify(syntheticNormal))
 
 for (const entry of skillDirs) {
   const file = join(SKILLS, entry.name, 'SKILL.md')
@@ -99,8 +115,12 @@ check('skills: directory matches the pinned 59-skill list exactly',
 for (const principle of ['fix-root-causes', 'prove-it-works', 'guard-the-context-window']) {
   check(`skills: principle-${principle} present`, skillNames.has(`principle-${principle}`))
 }
+const potetoSkillPath = join(SKILLS, 'poteto-mode', 'SKILL.md')
+const potetoSkill = existsSync(potetoSkillPath)
+  ? readFileSync(potetoSkillPath, 'utf8')
+  : (fail('skills/poteto-mode/SKILL.md: missing — poteto-mode checks cannot run'), '')
 check('skills: poteto-mode hidden from model invocation',
-  frontmatter(readFileSync(join(SKILLS, 'poteto-mode', 'SKILL.md'), 'utf8'), 'poteto-mode')?.['disable-model-invocation'] === 'true')
+  potetoSkill !== '' && frontmatter(potetoSkill, 'poteto-mode')?.['disable-model-invocation'] === 'true')
 
 // --- 2. agents: shipped briefs, not skill-bundle entries ---------------------
 
@@ -127,10 +147,11 @@ check('adapter: maps transcripts to the helper', adapterText.includes('session.v
 check('adapter: names the preset personas', adapterText.includes('`agent_preset: "poteto-agent"`') && adapterText.includes('`agent_preset: "comment-sicko"`'))
 check('adapter: maps skill write roots', adapterText.includes('.dsh/skills/') && adapterText.includes('~/.agents/skills/'))
 check('adapter: forbids Cursor model slugs', adapterText.includes('Never write a Cursor slug'))
-const poteto = readFileSync(join(SKILLS, 'poteto-mode', 'SKILL.md'), 'utf8')
-check('poteto-mode points at the adapter', poteto.includes('docs/harness/deepseek-harness.md'))
+check('poteto-mode points at the adapter', potetoSkill.includes('docs/harness/deepseek-harness.md'))
 
-const routerText = readFileSync(join(ROOT, 'router.md'), 'utf8')
+const routerPath = join(ROOT, 'router.md')
+check('router document exists', existsSync(routerPath))
+const routerText = existsSync(routerPath) ? readFileSync(routerPath, 'utf8') : ''
 check('router: adapter placeholder once', (routerText.match(/\{\{adapter\}\}/g) ?? []).length === 1)
 check('router: playbook placeholder once', (routerText.match(/\{\{potetoMode\}\}/g) ?? []).length === 1)
 check('router: reads the playbook instead of the skill tool', routerText.includes('Do not reach for the `skill` tool'))
@@ -139,7 +160,9 @@ check('router: names poteto-mode', routerText.includes('poteto-mode'))
 
 // --- 4. manifest and patch ---------------------------------------------------
 
-const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+const manifestPath = join(ROOT, 'package.json')
+check('manifest: package.json exists', existsSync(manifestPath))
+const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : {}
 check('manifest: name', manifest.name === 'dsh-pstack')
 check('manifest: bundle patch declared', manifest.dsh?.bundle?.patch === './cordis.patch.yml')
 check('manifest: patch file exists', existsSync(join(ROOT, 'cordis.patch.yml')))
@@ -149,12 +172,17 @@ for (const file of ['index.js', 'presets.mjs', 'presets-review.mjs', 'router.md'
   check(`manifest: files covers ${file}`, (manifest.files ?? []).some(entry => entry === file || entry === `${file}/`))
 }
 for (const locale of ['en', 'zh']) {
-  const meta = JSON.parse(readFileSync(join(ROOT, 'locale', `${locale}.json`), 'utf8'))
+  const localePath = join(ROOT, 'locale', `${locale}.json`)
+  check(`locale/${locale}.json exists`, existsSync(localePath))
+  const meta = existsSync(localePath) ? JSON.parse(readFileSync(localePath, 'utf8')) : {}
   check(`locale/${locale}.json: meta title`, typeof meta.meta?.title === 'string' && meta.meta.title.length > 0)
   check(`locale/${locale}.json: meta description`, typeof meta.meta?.description === 'string' && meta.meta.description.length > 0)
 }
 
-const patch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
+// The checks below are substring greps and only guard against drift from the
+// declared patch shape; the patch's !!js syntax is validated by the Host when
+// it loads the file, not here.
+const patch = existsSync(join(ROOT, 'cordis.patch.yml')) ? readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8') : ''
 check('patch: inserts pstack-router', patch.includes('id: pstack-router') && patch.includes("name: 'dsh-pstack'"))
 check('patch: inserts pstack-skills', patch.includes('id: pstack-skills') && patch.includes("@deepseek-ai/dsh-skill-filesystem"))
 check('patch: single provider instance', (patch.match(/^ {4}- id: /gm) ?? []).length === 2)
@@ -165,292 +193,346 @@ check('patch: new sessions default to the pstack preset', /^- id: agent-preset-r
 
 // --- 5. orchestration presets ------------------------------------------------
 
-const { buildPresets, SUBAGENT_PRESET_IDS } = await import(pathToFileURL(join(ROOT, 'presets.mjs')).href)
-const presets = buildPresets({ root: ROOT })
-const byId = new Map(presets.map(preset => [preset.id, preset]))
-check('presets: three declared', presets.length === 3 && ['pstack', 'poteto-agent', 'comment-sicko'].every(id => byId.has(id)))
+// presets.mjs reads the policy file at buildPresets() time, so a missing file
+// must be reported here instead of crashing the gate with a bare ENOENT.
+const presetsEntry = join(ROOT, 'presets.mjs')
+const planPolicyPath = join(ROOT, 'presets', 'plan-mode.policy.md')
+check('presets: plan-mode.policy.md exists', existsSync(planPolicyPath))
+if (!existsSync(presetsEntry)) fail('presets.mjs: missing — preset checks cannot run')
+// SUBAGENT_PRESET_IDS is reused by the plugin section below; an empty default
+// degrades that section to a named failure when the preset checks cannot run.
+let SUBAGENT_PRESET_IDS = []
+if (existsSync(presetsEntry) && existsSync(planPolicyPath)) {
+  const { buildPresets, SUBAGENT_PRESET_IDS: subagentPresetIds } = await import(pathToFileURL(presetsEntry).href)
+  SUBAGENT_PRESET_IDS = subagentPresetIds
+  const presets = buildPresets({ root: ROOT })
+  const byId = new Map(presets.map(preset => [preset.id, preset]))
+  check('presets: three declared', presets.length === 3 && ['pstack', 'poteto-agent', 'comment-sicko'].every(id => byId.has(id)))
 
-const flatten = rows => rows.flatMap(row => row.group === true ? flatten(row.config) : [row])
+  const flatten = rows => rows.flatMap(row => row.group === true ? flatten(row.config) : [row])
 
-for (const preset of presets) {
-  const flat = flatten(preset.plugins)
-  const ids = flat.map(row => row.id)
-  check(`preset ${preset.id}: plugin ids unique`, new Set(ids).size === ids.length)
-  check(`preset ${preset.id}: every row names a plugin`, flat.every(row => typeof row.name === 'string' && row.name.length > 0))
-  check(`preset ${preset.id}: package names are shipped scopes`,
-    flat.every(row => row.name === 'cordis:group' || row.name.startsWith('@deepseek-ai/')))
-}
-// One shell per host: the delegation presets must not mount both.
-const windowsHost = process.platform === 'win32'
-for (const id of ['poteto-agent', 'comment-sicko']) {
-  const flat = flatten(byId.get(id).plugins)
-  const bash = flat.find(row => row.id === 'tool-bash')
-  const pwsh = flat.find(row => row.id === 'tool-pwsh')
-  check(`preset ${id}: one shell follows the platform`,
-    bash?.disabled === windowsHost && pwsh?.disabled === !windowsHost)
-}
-
-const sessionPreset = byId.get('pstack')
-const sessionFlat = flatten(sessionPreset.plugins)
-const delegation = sessionPreset.plugins.find(row => row.id === 'delegation')
-check('preset pstack: delegation group isolated', delegation?.group === true && delegation.isolate?.workflowEngine === true)
-const spawnTool = delegation?.config.find(row => row.id === 'tool-subagent')
-check('preset pstack: spawn tool under the plain name', spawnTool?.config?.provider === 'spawn' && spawnTool?.config?.toolName === 'subagent')
-check('preset pstack: exposes both pstack personas', JSON.stringify(spawnTool?.config?.allowedAgentPresets) === JSON.stringify(SUBAGENT_PRESET_IDS))
-check('preset pstack: no standing persona default', spawnTool?.config?.agentPreset === undefined)
-check('preset pstack: model selection stays on', spawnTool?.config?.modelSelection === true && spawnTool?.config?.modelDiscovery === true)
-check('preset pstack: keeps the standard tool surface',
-  ['tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-skill', 'tool-todo', 'tool-web', 'present', 'tool-goal', 'tool-schedule', 'tool-ask-user', 'tool-plugin-market']
-    .every(id => sessionFlat.some(row => row.id === id)))
-const planModeRow = sessionFlat.find(row => row.id === 'plan-mode')
-check('preset pstack: plan mode policy carried', typeof planModeRow?.config?.section === 'string' && planModeRow.config.section.length > 200)
-check('preset pstack: plan mode policy is body text', !(planModeRow?.config?.section ?? '').startsWith('---'))
-const managerRow = sessionFlat.find(row => row.id === 'tool-plugin-manager')
-check('preset pstack: plugin manager guarded by profile context',
-  managerRow?.disabled?.__jsExpr === "!ctx.get('profileContext')")
-
-// The self-comparison checks above cannot catch presets.mjs drifting from the
-// shipped preset-standard, so compare the top-level (id, name) rows against the
-// installed dsh-web-app copy. The patch yml carries !!js tags (not plain YAML),
-// but its top-level plugin rows are stably indented: `- id:` at 10 spaces with
-// `name:` on the next line; group config rows sit deeper and never match.
-const standardPatch = join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets', 'standard.patch.yml')
-if (!existsSync(standardPatch)) {
-  console.log('note: dsh-web-app not installed; standard mirror check skipped')
-} else {
-  const shippedLines = readFileSync(standardPatch, 'utf8').split(/\r?\n/)
-  const shipped = []
-  for (let i = 0; i < shippedLines.length; i++) {
-    const idMatch = /^ {10}- id: (\S+)$/.exec(shippedLines[i])
-    if (idMatch === null) continue
-    const nameMatch = /^ {12}name: (?:'([^']*)'|(\S+))$/.exec(shippedLines[i + 1] ?? '')
-    shipped.push({ id: idMatch[1], name: nameMatch !== null ? (nameMatch[1] ?? nameMatch[2]) : undefined })
+  for (const preset of presets) {
+    const flat = flatten(preset.plugins)
+    const ids = flat.map(row => row.id)
+    check(`preset ${preset.id}: plugin ids unique`, new Set(ids).size === ids.length)
+    check(`preset ${preset.id}: every row names a plugin`, flat.every(row => typeof row.name === 'string' && row.name.length > 0))
+    check(`preset ${preset.id}: package names are shipped scopes`,
+      flat.every(row => row.name === 'cordis:group' || row.name.startsWith('@deepseek-ai/')))
   }
-  const mirror = sessionPreset.plugins.map(({ id, name }) => ({ id, name }))
-  const firstDiff = shipped.findIndex((row, i) => row.id !== mirror[i]?.id || row.name !== mirror[i]?.name)
-  const mirrorDetail = shipped.length < 15
-    ? `extracted only ${shipped.length} top-level plugin rows from ${standardPatch}; the yml layout changed — update presets.mjs or this extraction`
-    : firstDiff === -1
-      ? ''
-      : `shipped has ${shipped.length} top-level rows, mirror has ${mirror.length}; first divergence at index ${firstDiff}: shipped ${JSON.stringify(shipped[firstDiff])} vs mirror ${JSON.stringify(mirror[firstDiff])}`
-  check('session preset mirrors shipped preset-standard (id+name sequence)', mirrorDetail === '', mirrorDetail)
+  // One shell per host: the delegation presets must not mount both.
+  const windowsHost = process.platform === 'win32'
+  for (const id of ['poteto-agent', 'comment-sicko']) {
+    const flat = flatten(byId.get(id).plugins)
+    const bash = flat.find(row => row.id === 'tool-bash')
+    const pwsh = flat.find(row => row.id === 'tool-pwsh')
+    check(`preset ${id}: one shell follows the platform`,
+      bash?.disabled === windowsHost && pwsh?.disabled === !windowsHost)
+  }
+
+  const sessionPreset = byId.get('pstack')
+  const sessionFlat = flatten(sessionPreset.plugins)
+  const delegation = sessionPreset.plugins.find(row => row.id === 'delegation')
+  check('preset pstack: delegation group isolated', delegation?.group === true && delegation.isolate?.workflowEngine === true)
+  const spawnTool = delegation?.config.find(row => row.id === 'tool-subagent')
+  check('preset pstack: spawn tool under the plain name', spawnTool?.config?.provider === 'spawn' && spawnTool?.config?.toolName === 'subagent')
+  check('preset pstack: exposes both pstack personas', JSON.stringify(spawnTool?.config?.allowedAgentPresets) === JSON.stringify(SUBAGENT_PRESET_IDS))
+  check('preset pstack: no standing persona default', spawnTool?.config?.agentPreset === undefined)
+  check('preset pstack: model selection stays on', spawnTool?.config?.modelSelection === true && spawnTool?.config?.modelDiscovery === true)
+  check('preset pstack: keeps the standard tool surface',
+    ['tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-skill', 'tool-todo', 'tool-web', 'present', 'tool-goal', 'tool-schedule', 'tool-ask-user', 'tool-plugin-market']
+      .every(id => sessionFlat.some(row => row.id === id)))
+  const planModeRow = sessionFlat.find(row => row.id === 'plan-mode')
+  check('preset pstack: plan mode policy carried', typeof planModeRow?.config?.section === 'string' && planModeRow.config.section.length > 200)
+  check('preset pstack: plan mode policy is body text', !(planModeRow?.config?.section ?? '').startsWith('---'))
+  const managerRow = sessionFlat.find(row => row.id === 'tool-plugin-manager')
+  check('preset pstack: plugin manager guarded by profile context',
+    managerRow?.disabled?.__jsExpr === "!ctx.get('profileContext')")
+
+  // The self-comparison checks above cannot catch presets.mjs drifting from the
+  // shipped preset-standard, so compare the top-level (id, name) rows against the
+  // installed dsh-web-app copy. The patch yml carries !!js tags (not plain YAML),
+  // but its top-level plugin rows are stably indented: `- id:` at 10 spaces with
+  // `name:` on the next line; group config rows sit deeper and never match.
+  const standardPatch = join(homedir(), '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets', 'standard.patch.yml')
+  if (!existsSync(standardPatch)) {
+    skipped.count += 1
+    console.log('note: dsh-web-app not installed; standard mirror check skipped')
+  } else {
+    const shippedLines = readFileSync(standardPatch, 'utf8').split(/\r?\n/)
+    const shipped = []
+    for (let i = 0; i < shippedLines.length; i++) {
+      const idMatch = /^ {10}- id: (\S+)$/.exec(shippedLines[i])
+      if (idMatch === null) continue
+      const nameMatch = /^ {12}name: (?:'([^']*)'|(\S+))$/.exec(shippedLines[i + 1] ?? '')
+      shipped.push({ id: idMatch[1], name: nameMatch !== null ? (nameMatch[1] ?? nameMatch[2]) : undefined })
+    }
+    const mirror = sessionPreset.plugins.map(({ id, name }) => ({ id, name }))
+    const firstDiff = shipped.findIndex((row, i) => row.id !== mirror[i]?.id || row.name !== mirror[i]?.name)
+    const mirrorDetail = shipped.length < 15
+      ? `extracted only ${shipped.length} top-level plugin rows from ${standardPatch}; the yml layout changed — update presets.mjs or this extraction`
+      : firstDiff === -1
+        ? ''
+        : `shipped has ${shipped.length} top-level rows, mirror has ${mirror.length}; first divergence at index ${firstDiff}: shipped ${JSON.stringify(shipped[firstDiff])} vs mirror ${JSON.stringify(mirror[firstDiff])}`
+    check('session preset mirrors shipped preset-standard (id+name sequence)', mirrorDetail === '', mirrorDetail)
+  }
+
+  const potetoPreset = byId.get('poteto-agent')
+  const potetoFlat = flatten(potetoPreset.plugins)
+  const potetoPersona = potetoFlat.find(row => row.id === 'persona')?.config?.prefix ?? ''
+  check('preset poteto-agent: persona is the shipped brief', potetoPersona.includes('poteto-mode') && !potetoPersona.startsWith('---'))
+  check('preset poteto-agent: can implement', potetoFlat.some(row => row.id === 'tool-fs' && row.config?.write !== false && row.config?.edit !== false))
+  check('preset poteto-agent: leaves questions to the parent', !potetoFlat.some(row => row.id === 'tool-ask-user'))
+  check('preset poteto-agent: does not nest delegation', !potetoFlat.some(row => row.id === 'tool-subagent'))
+
+  const sickoFlat = flatten(byId.get('comment-sicko').plugins)
+  const sickoFs = sickoFlat.find(row => row.id === 'tool-fs')
+  check('preset comment-sicko: read-only fs enforced', sickoFs?.config?.write === false && sickoFs?.config?.edit === false)
+  check('preset comment-sicko: persona is the shipped brief',
+    (sickoFlat.find(row => row.id === 'persona')?.config?.prefix ?? '').includes('Comment Sicko'))
 }
-
-const potetoPreset = byId.get('poteto-agent')
-const potetoFlat = flatten(potetoPreset.plugins)
-const potetoPersona = potetoFlat.find(row => row.id === 'persona')?.config?.prefix ?? ''
-check('preset poteto-agent: persona is the shipped brief', potetoPersona.includes('poteto-mode') && !potetoPersona.startsWith('---'))
-check('preset poteto-agent: can implement', potetoFlat.some(row => row.id === 'tool-fs' && row.config?.write !== false && row.config?.edit !== false))
-check('preset poteto-agent: leaves questions to the parent', !potetoFlat.some(row => row.id === 'tool-ask-user'))
-check('preset poteto-agent: does not nest delegation', !potetoFlat.some(row => row.id === 'tool-subagent'))
-
-const sickoFlat = flatten(byId.get('comment-sicko').plugins)
-const sickoFs = sickoFlat.find(row => row.id === 'tool-fs')
-check('preset comment-sicko: read-only fs enforced', sickoFs?.config?.write === false && sickoFs?.config?.edit === false)
-check('preset comment-sicko: persona is the shipped brief',
-  (sickoFlat.find(row => row.id === 'persona')?.config?.prefix ?? '').includes('Comment Sicko'))
 
 // --- 6. plugin behavior ------------------------------------------------------
 
-const plugin = await import(pathToFileURL(join(ROOT, 'index.js')).href)
-check('plugin: stable name', plugin.name === 'pstack-router')
-check('plugin: injects systemPrompt as a service list', Array.isArray(plugin.inject) && plugin.inject.includes('systemPrompt'))
-check('plugin: inject names only real services', Array.isArray(plugin.inject) && plugin.inject.every(name => ['systemPrompt', 'agentPresets'].includes(name)))
-check('plugin: agentPresets is not a hard dependency', Array.isArray(plugin.inject) && !plugin.inject.includes('agentPresets'))
+const pluginEntry = join(ROOT, 'index.js')
+if (!existsSync(pluginEntry)) fail('index.js: missing — plugin checks cannot run')
+if (existsSync(pluginEntry)) {
+  const plugin = await import(pathToFileURL(pluginEntry).href)
+  check('plugin: stable name', plugin.name === 'pstack-router')
+  check('plugin: injects systemPrompt as a service list', Array.isArray(plugin.inject) && plugin.inject.includes('systemPrompt'))
+  check('plugin: inject names only real services', Array.isArray(plugin.inject) && plugin.inject.every(name => ['systemPrompt', 'agentPresets'].includes(name)))
+  check('plugin: agentPresets is not a hard dependency', Array.isArray(plugin.inject) && !plugin.inject.includes('agentPresets'))
 
-function stubContext({ registry: withRegistry = true, broken = [], known = [], logger, getService = withRegistry } = {}) {
-  const sections = []
-  const registrations = []
-  const disposers = []
-  const pending = []
-  const registry = {
-    async list() {
-      return [
-        ...known.map(id => ({ id, broken: undefined })),
-        ...registrations.map(definition => ({ id: definition.id, broken: broken.includes(definition.id) ? 'failed to activate' : undefined })),
-      ]
-    },
-    async register(definition) { registrations.push(definition); return async () => {} },
+  function stubContext({ registry: withRegistry = true, broken = [], known = [], logger, getService = withRegistry } = {}) {
+    const sections = []
+    const registrations = []
+    const disposers = []
+    const pending = []
+    const registry = {
+      async list() {
+        return [
+          ...known.map(id => ({ id, broken: undefined })),
+          ...registrations.map(definition => ({ id: definition.id, broken: broken.includes(definition.id) ? 'failed to activate' : undefined })),
+        ]
+      },
+      async register(definition) { registrations.push(definition); return async () => {} },
+    }
+    const ctx = {
+      sections,
+      registrations,
+      disposers,
+      systemPrompt: { section: (section) => { sections.push(section); return () => {} } },
+      effect: (disposer) => { disposers.push(disposer) },
+      logger,
+      get: key => key === 'agentPresets' && getService ? registry : undefined,
+      // The registry service arrives after this plugin activates, so the real
+      // plugin waits for it through ctx.inject.
+      inject: (services, callback) => {
+        if (!services.includes('agentPresets') || !withRegistry) return undefined
+        pending.push(Promise.resolve(callback(ctx)))
+      },
+      // Wait for the deferred registration the way the Host settles the fiber.
+      settled: async () => { await Promise.all(pending) },
+    }
+    return ctx
   }
-  const ctx = {
-    sections,
-    registrations,
-    disposers,
-    systemPrompt: { section: (section) => { sections.push(section); return () => {} } },
-    effect: (disposer) => { disposers.push(disposer) },
-    logger,
-    get: key => key === 'agentPresets' && getService ? registry : undefined,
-    // The registry service arrives after this plugin activates, so the real
-    // plugin waits for it through ctx.inject.
-    inject: (services, callback) => {
-      if (!services.includes('agentPresets') || !withRegistry) return undefined
-      pending.push(Promise.resolve(callback(ctx)))
-    },
-    // Wait for the deferred registration the way the Host settles the fiber.
-    settled: async () => { await Promise.all(pending) },
+
+  /** Apply the plugin and wait for its deferred preset registration. */
+  async function applyPlugin(ctx, config) {
+    await plugin.apply(ctx, config)
+    await ctx.settled()
   }
-  return ctx
+
+  const enabled = stubContext()
+  await applyPlugin(enabled, { enabled: true })
+  check('plugin: registers children before the session preset',
+    enabled.registrations.map(d => d.id).join(',') === 'poteto-agent,comment-sicko,pstack,review-triage')
+  check('plugin: owns one disposer per preset', enabled.disposers.length === 4)
+  check('plugin: registers one section', enabled.sections.length === 1)
+  check('plugin: session preset carries the allowlist',
+    JSON.stringify(enabled.registrations.find(d => d.id === 'pstack')?.plugins
+      ?.find(row => row.id === 'delegation')?.config?.find(row => row.id === 'tool-subagent')?.config?.allowedAgentPresets)
+    === JSON.stringify(SUBAGENT_PRESET_IDS))
+  const section = enabled.sections[0] ?? {}
+  check('plugin: section name', section.name === 'pstack-router')
+  check('plugin: default order', section.order === 700)
+  check('plugin: adapter path substituted', typeof section.text === 'string' && section.text.includes(ADAPTER) && !section.text.includes('{{adapter}}'))
+  check('plugin: playbook path substituted',
+    typeof section.text === 'string'
+    && section.text.includes(join(ROOT, 'skills', 'poteto-mode', 'SKILL.md'))
+    && !section.text.includes('{{potetoMode}}'))
+
+  const custom = stubContext()
+  await applyPlugin(custom, { order: 123, text: 'custom {{adapter}} text' })
+  check('plugin: config order honored', custom.sections[0]?.order === 123)
+  check('plugin: config text honored', custom.sections[0]?.text === `custom ${ADAPTER} text`)
+
+  const disabled = stubContext()
+  await applyPlugin(disabled, { enabled: false })
+  check('plugin: enabled=false skips the directive', disabled.sections.length === 0)
+  check('plugin: enabled=false still registers presets', disabled.registrations.length === 4)
+
+  const degraded = stubContext({ broken: ['poteto-agent', 'comment-sicko'] })
+  await applyPlugin(degraded, { enabled: false })
+  const degradedSpawn = degraded.registrations.find(definition => definition.id === 'pstack')
+    ?.plugins.find(row => row.id === 'delegation')?.config.find(row => row.id === 'tool-subagent')
+  check('plugin: broken personas disable agent_preset instead of failing the mount',
+    degradedSpawn?.config?.allowedAgentPresets === undefined && degradedSpawn?.config?.provider === 'spawn')
+
+  const partially = stubContext({ broken: ['comment-sicko'] })
+  await applyPlugin(partially, { enabled: false })
+  const partialSpawn = partially.registrations.find(definition => definition.id === 'pstack')
+    ?.plugins.find(row => row.id === 'delegation')?.config.find(row => row.id === 'tool-subagent')
+  check('plugin: only healthy personas stay selectable',
+    JSON.stringify(partialSpawn?.config?.allowedAgentPresets) === JSON.stringify(['poteto-agent']))
+
+  const headless = stubContext({ registry: false })
+  await applyPlugin(headless, {})
+  check('plugin: no preset service is not fatal', headless.registrations.length === 0 && headless.sections.length === 1)
+
+  for (const [label, config, pattern] of [
+    ['enabled', { enabled: 'yes' }, /config\.enabled must be a boolean/],
+    ['order', { order: 'far' }, /config\.order must be a finite number/],
+    ['text', { text: '' }, /config\.text must be a non-empty string/],
+    ['shape', [], /config must be an object/],
+    ['config', null, /config must be an object/],
+    ['triage shape', { reviewTriage: [] }, /config\.reviewTriage must be an object/],
+    ['triage null', { reviewTriage: null }, /config\.reviewTriage must be an object/],
+    ['triage apply string', { reviewTriage: { apply: 'yes' } }, /config\.reviewTriage\.apply must be a boolean/],
+  ]) {
+    let error
+    try { await applyPlugin(stubContext(), config) } catch (caught) { error = caught }
+    check(`plugin: rejects bad ${label}`, error instanceof TypeError && pattern.test(error.message))
+  }
+
+  // Warnings are the only diagnostic when a preset id is taken or breaks, and a
+  // context without a logger must not turn that into a crash.
+  const takenLog = { warnings: [], warn(message) { this.warnings.push(message) } }
+  const taken = stubContext({ known: ['pstack'], logger: takenLog })
+  await applyPlugin(taken, { enabled: false })
+  check('plugin: an existing preset id is left alone', !taken.registrations.some(definition => definition.id === 'pstack'))
+  check('plugin: an existing preset id warns', takenLog.warnings.some(line => line.includes('"pstack" already exists')))
+
+  const silentDuplicate = stubContext({ known: ['poteto-agent'] })
+  await applyPlugin(silentDuplicate, { enabled: false })
+  check('plugin: a taken id without a logger still registers the rest',
+    silentDuplicate.registrations.map(definition => definition.id).join(',') === 'comment-sicko,pstack,review-triage')
+
+  const sessionLog = { warnings: [], warn(message) { this.warnings.push(message) } }
+  const brokenSession = stubContext({ broken: ['pstack'], logger: sessionLog })
+  await applyPlugin(brokenSession, { enabled: false })
+  check('plugin: a broken session preset warns with its reason',
+    sessionLog.warnings.some(line => line.includes('"pstack" did not activate cleanly') && line.includes('failed to activate')))
+
+  const silentSession = stubContext({ broken: ['pstack'] })
+  await applyPlugin(silentSession, { enabled: false })
+  check('plugin: a broken session preset without a logger still settles', silentSession.registrations.length === 4)
+
+  const personaLog = { warnings: [], warn(message) { this.warnings.push(message) } }
+  const brokenPersona = stubContext({ broken: ['comment-sicko'], logger: personaLog })
+  await applyPlugin(brokenPersona, { enabled: false })
+  check('plugin: a broken persona warns by name',
+    personaLog.warnings.some(line => line.includes('comment-sicko') && line.includes('agent_preset selection stays off')))
+
+  const lateLog = { warnings: [], warn(message) { this.warnings.push(message) } }
+  const lateRegistry = stubContext({ getService: false, logger: lateLog })
+  await applyPlugin(lateRegistry, { enabled: false })
+  check('plugin: a missing registry warns instead of registering',
+    lateRegistry.registrations.length === 0 && lateLog.warnings.some(line => line.includes('no agentPresets service')))
+
+  const lateSilent = stubContext({ getService: false })
+  await applyPlugin(lateSilent, { enabled: true })
+  check('plugin: a missing registry without a logger is not fatal',
+    lateSilent.registrations.length === 0 && lateSilent.sections.length === 1)
+
+  const zeroOrder = stubContext()
+  await applyPlugin(zeroOrder, { enabled: true, order: 0 })
+  check('plugin: order 0 is honored, not defaulted', zeroOrder.sections[0]?.order === 0)
 }
 
-/** Apply the plugin and wait for its deferred preset registration. */
-async function applyPlugin(ctx, config) {
-  await plugin.apply(ctx, config)
-  await ctx.settled()
+// --- 6b. sync-upstream comparator — synthetic unit tests ---------------------
+// Everything below exercises the pure comparator and the walk on synthetic
+// data only; the live byte gate itself is `node scripts/sync-upstream.mjs
+// --upstream <checkout>` and is not run from here.
+
+const syncScript = join(ROOT, 'scripts', 'sync-upstream.mjs')
+if (!existsSync(syncScript)) {
+  fail('scripts/sync-upstream.mjs: missing — comparator unit tests cannot run')
+} else {
+  const { compareTrees, walk } = await import(pathToFileURL(syncScript).href)
+  const upstreamFiles = new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same'], ['plugin.json', 'manifest']])
+  const expectations = { expectedMissing: ['plugin.json'], expectedChanged: ['README.md'] }
+
+  const clean = compareTrees(
+    new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'same']]),
+    upstreamFiles,
+    expectations,
+  )
+  check('comparator unit test (synthetic): declared deltas pass', clean.failed === 0 && clean.extra.length === 0)
+
+  const drifted = compareTrees(
+    new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'changed']]),
+    upstreamFiles,
+    expectations,
+  )
+  check('comparator unit test (synthetic): a content drift outside the list fails',
+    drifted.unexpectedChanged.join(',') === 'skills/x/SKILL.md' && drifted.failed === 1)
+
+  const dropped = compareTrees(new Map([['README.md', 'port-readme']]), upstreamFiles, expectations)
+  check('comparator unit test (synthetic): a dropped file outside the list fails',
+    dropped.unexpectedMissing.join(',') === 'skills/x/SKILL.md' && dropped.failed === 1)
+
+  const stale = compareTrees(
+    new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same']]),
+    upstreamFiles,
+    expectations,
+  )
+  check('comparator unit test (synthetic): an edited file that matches upstream is a stale expectation',
+    stale.staleIdentical.join(',') === 'README.md' && stale.failed === 1)
+
+  const restored = compareTrees(
+    new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'same'], ['plugin.json', 'manifest']]),
+    upstreamFiles,
+    expectations,
+  )
+  check('comparator unit test (synthetic): a file restored despite expectedMissing is a stale expectation',
+    restored.staleRestored?.join(',') === 'plugin.json' && restored.failed === 1)
+
+  const extraFiles = compareTrees(
+    new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same'], ['docs/new.md', 'ours']]),
+    upstreamFiles,
+    { expectedMissing: ['plugin.json'], expectedChanged: [] },
+  )
+  check('comparator unit test (synthetic): extra files are informational, not failures',
+    extraFiles.extra.join(',') === 'docs/new.md' && extraFiles.failed === 0)
+
+  // SKIP names are tool output and are honored only at the repo root's first
+  // level: a nested target/ directory is real content and must stay visible to
+  // the byte comparison in both trees.
+  const skipSandbox = mkdtempSync(join(tmpdir(), 'dsh-pstack-walk-'))
+  try {
+    mkdirSync(join(skipSandbox, 'port', 'sub', 'target'), { recursive: true })
+    writeFileSync(join(skipSandbox, 'port', 'sub', 'target', 'x'), 'same')
+    mkdirSync(join(skipSandbox, 'port', 'target'), { recursive: true })
+    writeFileSync(join(skipSandbox, 'port', 'target', 'y'), 'tool-output')
+    mkdirSync(join(skipSandbox, 'upstream', 'sub', 'target'), { recursive: true })
+    writeFileSync(join(skipSandbox, 'upstream', 'sub', 'target', 'x'), 'drifted')
+    const portFiles = walk(join(skipSandbox, 'port'))
+    const upstreamWalk = walk(join(skipSandbox, 'upstream'))
+    check('comparator unit test (synthetic): nested target/ participates in the walk',
+      portFiles.has('sub/target/x') && upstreamWalk.has('sub/target/x'),
+      JSON.stringify([...portFiles.keys()]))
+    check('comparator unit test (synthetic): root-level target/ still skipped',
+      !portFiles.has('target/y') && !portFiles.has('target'),
+      JSON.stringify([...portFiles.keys()]))
+    const toValues = tree => new Map([...tree].map(([path, abs]) => [path, readFileSync(abs, 'utf8')]))
+    const nestedCmp = compareTrees(toValues(portFiles), toValues(upstreamWalk), { expectedMissing: [], expectedChanged: [] })
+    check('comparator unit test (synthetic): nested target/ drift is reported',
+      nestedCmp.unexpectedChanged.join(',') === 'sub/target/x' && nestedCmp.failed === 1,
+      JSON.stringify(nestedCmp))
+  } finally {
+    rmSync(skipSandbox, { recursive: true, force: true })
+  }
 }
-
-const enabled = stubContext()
-await applyPlugin(enabled, { enabled: true })
-check('plugin: registers children before the session preset',
-  enabled.registrations.map(d => d.id).join(',') === 'poteto-agent,comment-sicko,pstack,review-triage')
-check('plugin: owns one disposer per preset', enabled.disposers.length === 4)
-check('plugin: registers one section', enabled.sections.length === 1)
-check('plugin: session preset carries the allowlist',
-  JSON.stringify(enabled.registrations.find(d => d.id === 'pstack')?.plugins
-    ?.find(row => row.id === 'delegation')?.config?.find(row => row.id === 'tool-subagent')?.config?.allowedAgentPresets)
-  === JSON.stringify(SUBAGENT_PRESET_IDS))
-const section = enabled.sections[0] ?? {}
-check('plugin: section name', section.name === 'pstack-router')
-check('plugin: default order', section.order === 700)
-check('plugin: adapter path substituted', typeof section.text === 'string' && section.text.includes(ADAPTER) && !section.text.includes('{{adapter}}'))
-check('plugin: playbook path substituted',
-  typeof section.text === 'string'
-  && section.text.includes(join(ROOT, 'skills', 'poteto-mode', 'SKILL.md'))
-  && !section.text.includes('{{potetoMode}}'))
-
-const custom = stubContext()
-await applyPlugin(custom, { order: 123, text: 'custom {{adapter}} text' })
-check('plugin: config order honored', custom.sections[0]?.order === 123)
-check('plugin: config text honored', custom.sections[0]?.text === `custom ${ADAPTER} text`)
-
-const disabled = stubContext()
-await applyPlugin(disabled, { enabled: false })
-check('plugin: enabled=false skips the directive', disabled.sections.length === 0)
-check('plugin: enabled=false still registers presets', disabled.registrations.length === 4)
-
-const degraded = stubContext({ broken: ['poteto-agent', 'comment-sicko'] })
-await applyPlugin(degraded, { enabled: false })
-const degradedSpawn = degraded.registrations.find(definition => definition.id === 'pstack')
-  ?.plugins.find(row => row.id === 'delegation')?.config.find(row => row.id === 'tool-subagent')
-check('plugin: broken personas disable agent_preset instead of failing the mount',
-  degradedSpawn?.config?.allowedAgentPresets === undefined && degradedSpawn?.config?.provider === 'spawn')
-
-const partially = stubContext({ broken: ['comment-sicko'] })
-await applyPlugin(partially, { enabled: false })
-const partialSpawn = partially.registrations.find(definition => definition.id === 'pstack')
-  ?.plugins.find(row => row.id === 'delegation')?.config.find(row => row.id === 'tool-subagent')
-check('plugin: only healthy personas stay selectable',
-  JSON.stringify(partialSpawn?.config?.allowedAgentPresets) === JSON.stringify(['poteto-agent']))
-
-const headless = stubContext({ registry: false })
-await applyPlugin(headless, {})
-check('plugin: no preset service is not fatal', headless.registrations.length === 0 && headless.sections.length === 1)
-
-for (const [label, config, pattern] of [
-  ['enabled', { enabled: 'yes' }, /config\.enabled must be a boolean/],
-  ['order', { order: 'far' }, /config\.order must be a finite number/],
-  ['text', { text: '' }, /config\.text must be a non-empty string/],
-  ['shape', [], /config must be an object/],
-  ['config', null, /config must be an object/],
-  ['triage shape', { reviewTriage: [] }, /config\.reviewTriage must be an object/],
-  ['triage null', { reviewTriage: null }, /config\.reviewTriage must be an object/],
-]) {
-  let error
-  try { await applyPlugin(stubContext(), config) } catch (caught) { error = caught }
-  check(`plugin: rejects bad ${label}`, error instanceof TypeError && pattern.test(error.message))
-}
-
-// Warnings are the only diagnostic when a preset id is taken or breaks, and a
-// context without a logger must not turn that into a crash.
-const takenLog = { warnings: [], warn(message) { this.warnings.push(message) } }
-const taken = stubContext({ known: ['pstack'], logger: takenLog })
-await applyPlugin(taken, { enabled: false })
-check('plugin: an existing preset id is left alone', !taken.registrations.some(definition => definition.id === 'pstack'))
-check('plugin: an existing preset id warns', takenLog.warnings.some(line => line.includes('"pstack" already exists')))
-
-const silentDuplicate = stubContext({ known: ['poteto-agent'] })
-await applyPlugin(silentDuplicate, { enabled: false })
-check('plugin: a taken id without a logger still registers the rest',
-  silentDuplicate.registrations.map(definition => definition.id).join(',') === 'comment-sicko,pstack,review-triage')
-
-const sessionLog = { warnings: [], warn(message) { this.warnings.push(message) } }
-const brokenSession = stubContext({ broken: ['pstack'], logger: sessionLog })
-await applyPlugin(brokenSession, { enabled: false })
-check('plugin: a broken session preset warns with its reason',
-  sessionLog.warnings.some(line => line.includes('"pstack" did not activate cleanly') && line.includes('failed to activate')))
-
-const silentSession = stubContext({ broken: ['pstack'] })
-await applyPlugin(silentSession, { enabled: false })
-check('plugin: a broken session preset without a logger still settles', silentSession.registrations.length === 4)
-
-const personaLog = { warnings: [], warn(message) { this.warnings.push(message) } }
-const brokenPersona = stubContext({ broken: ['comment-sicko'], logger: personaLog })
-await applyPlugin(brokenPersona, { enabled: false })
-check('plugin: a broken persona warns by name',
-  personaLog.warnings.some(line => line.includes('comment-sicko') && line.includes('agent_preset selection stays off')))
-
-const lateLog = { warnings: [], warn(message) { this.warnings.push(message) } }
-const lateRegistry = stubContext({ getService: false, logger: lateLog })
-await applyPlugin(lateRegistry, { enabled: false })
-check('plugin: a missing registry warns instead of registering',
-  lateRegistry.registrations.length === 0 && lateLog.warnings.some(line => line.includes('no agentPresets service')))
-
-const lateSilent = stubContext({ getService: false })
-await applyPlugin(lateSilent, { enabled: true })
-check('plugin: a missing registry without a logger is not fatal',
-  lateSilent.registrations.length === 0 && lateSilent.sections.length === 1)
-
-const zeroOrder = stubContext()
-await applyPlugin(zeroOrder, { enabled: true, order: 0 })
-check('plugin: order 0 is honored, not defaulted', zeroOrder.sections[0]?.order === 0)
-
-// --- 6b. upstream byte gate (pure compare) ----------------------------------
-
-const { compareTrees } = await import(pathToFileURL(join(ROOT, 'scripts', 'sync-upstream.mjs')).href)
-const upstreamFiles = new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same'], ['plugin.json', 'manifest']])
-const expectations = { expectedMissing: ['plugin.json'], expectedChanged: ['README.md'] }
-
-const clean = compareTrees(
-  new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'same']]),
-  upstreamFiles,
-  expectations,
-)
-check('upstream gate: declared deltas pass', clean.failed === 0 && clean.extra.length === 0)
-
-const drifted = compareTrees(
-  new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'changed']]),
-  upstreamFiles,
-  expectations,
-)
-check('upstream gate: a content drift outside the list fails',
-  drifted.unexpectedChanged.join(',') === 'skills/x/SKILL.md' && drifted.failed === 1)
-
-const dropped = compareTrees(new Map([['README.md', 'port-readme']]), upstreamFiles, expectations)
-check('upstream gate: a dropped file outside the list fails',
-  dropped.unexpectedMissing.join(',') === 'skills/x/SKILL.md' && dropped.failed === 1)
-
-const stale = compareTrees(
-  new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same']]),
-  upstreamFiles,
-  expectations,
-)
-check('upstream gate: an edited file that matches upstream is a stale expectation',
-  stale.staleIdentical.join(',') === 'README.md' && stale.failed === 1)
-
-const restored = compareTrees(
-  new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'same'], ['plugin.json', 'manifest']]),
-  upstreamFiles,
-  expectations,
-)
-check('upstream gate: a file restored despite expectedMissing is a stale expectation',
-  restored.staleRestored?.join(',') === 'plugin.json' && restored.failed === 1)
-
-const extraFiles = compareTrees(
-  new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same'], ['docs/new.md', 'ours']]),
-  upstreamFiles,
-  { expectedMissing: ['plugin.json'], expectedChanged: [] },
-)
-check('upstream gate: extra files are informational, not failures',
-  extraFiles.extra.join(',') === 'docs/new.md' && extraFiles.failed === 0)
 
 // --- 7. transcript helper (multi-frame session log) --------------------------
 
@@ -554,7 +636,7 @@ try {
       linkRun.status === 0 && linkRun.stdout.includes('user/message'),
       `status ${linkRun.status}, stdout ${JSON.stringify(linkRun.stdout)}, stderr ${linkRun.stderr}`)
   } else {
-    console.log('note: links unavailable here; the junction/symlink check was skipped')
+    skipped.count += 1
   }
 } finally {
   rmSync(sandbox, { recursive: true, force: true })
@@ -756,6 +838,11 @@ process.stdout.write(JSON.stringify(out))
   // instead of silently choosing.
   writeSession('pref0101', zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'user/message', seq: 1, data: { text: 'older prefix fixture' } })}\n`)))
   writeSession('pref0102', zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'user/message', seq: 2, data: { text: 'newer prefix fixture' } })}\n`)))
+  // Back-to-back writes can land on the same clock tick (or invert), flipping
+  // which fixture sorts as newest. Pin the mtimes so this checks prefix
+  // selection, not clock resolution.
+  utimesSync(join(sessionsDir, 'session-pref0101', 'session.v4.jsonl.zstd'), new Date(1e12), new Date(1e12))
+  utimesSync(join(sessionsDir, 'session-pref0102', 'session.v4.jsonl.zstd'), new Date(2e12), new Date(2e12))
   const prefixRun = runStatus(helper, ['show', '--cwd', workspace, '--session', 'pref010'])
   check('transcript: --session prefix matching several warns and still shows the newest',
     prefixRun.status === 0
@@ -808,4 +895,4 @@ if (failures.length > 0) {
   console.error(`\n${failures.length} failure(s), ${checks.length} check(s) passed`)
   process.exit(1)
 }
-console.log(`ok — ${checks.length} checks across ${skillDirs.length} skills, 2 agents, 3 presets, adapter, manifest, patch, router`)
+console.log(`ok — ${checks.length} checks${skipped.count > 0 ? ` (${skipped.count} skipped)` : ''} across ${skillDirs.length} skills, 2 agents, 3 presets, adapter, manifest, patch, router`)
