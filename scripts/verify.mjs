@@ -69,7 +69,33 @@ for (const entry of skillDirs) {
   skillNames.add(data.name)
 }
 
-check('skills: at least 50 directory bundles', skillDirs.length >= 50, `found ${skillDirs.length}`)
+// A floor count cannot catch a deleted or renamed directory, so the exact bundle
+// is pinned here: 58 upstream skills + review-triage (added by this port).
+const PINNED_SKILLS = [
+  'architect', 'arena', 'automate-me', 'benchmark-checklist', 'blast-radius',
+  'bro', 'correct', 'create-formal-verification-skill', 'create-verification-skill',
+  'figure-it-out', 'how', 'in-your-own-words', 'interrogate', 'ketchup', 'ketchup-video',
+  'maintain-formal-verification-skill', 'maintain-verification-skill', 'make-bot-ui',
+  'no-comments', 'poteto-help', 'poteto-mode', 'principle-attack-the-premise',
+  'principle-boundary-discipline', 'principle-build-the-lever', 'principle-encode-lessons-in-structure',
+  'principle-exhaust-the-design-space', 'principle-experience-first', 'principle-explain-the-number',
+  'principle-fix-root-causes', 'principle-foundational-thinking', 'principle-guard-the-context-window',
+  'principle-laziness-protocol', 'principle-make-operations-idempotent',
+  'principle-migrate-callers-then-delete-legacy-apis', 'principle-minimize-reader-load',
+  'principle-model-the-domain', 'principle-never-block-on-the-human', 'principle-outcome-oriented-execution',
+  'principle-prove-it-works', 'principle-redesign-from-first-principles',
+  'principle-separate-before-serializing-shared-state', 'principle-sequence-verifiable-units',
+  'principle-subtract-before-you-add', 'principle-test-behavior-not-implementation',
+  'principle-type-system-discipline', 'recall', 'reflect', 'review-triage', 'setup-pstack',
+  'sharpen', 'show-me-your-work', 'statechart', 'swarm', 'tdd', 'teach', 'technical-writing',
+  'typescript-best-practices', 'unslop', 'why',
+]
+const portedSkills = skillDirs.map(entry => entry.name)
+const missingSkills = PINNED_SKILLS.filter(name => !portedSkills.includes(name))
+const extraSkills = portedSkills.filter(name => !PINNED_SKILLS.includes(name))
+check('skills: directory matches the pinned 59-skill list exactly',
+  missingSkills.length === 0 && extraSkills.length === 0,
+  `missing: [${missingSkills.join(', ')}] extra: [${extraSkills.join(', ')}]`)
 for (const principle of ['fix-root-causes', 'prove-it-works', 'guard-the-context-window']) {
   check(`skills: principle-${principle} present`, skillNames.has(`principle-${principle}`))
 }
@@ -119,7 +145,7 @@ check('manifest: bundle patch declared', manifest.dsh?.bundle?.patch === './cord
 check('manifest: patch file exists', existsSync(join(ROOT, 'cordis.patch.yml')))
 check('manifest: icon export', manifest.exports?.['./icon'] === './icon.svg' && existsSync(join(ROOT, 'icon.svg')))
 check('manifest: locale export', typeof manifest.exports?.['./locale/*.json'] === 'string')
-for (const file of ['index.js', 'presets.mjs', 'presets/', 'router.md', 'cordis.patch.yml', 'locale/', 'icon.svg', 'README.md', 'COMPATIBILITY.md', 'NOTICE.md', 'LICENSE']) {
+for (const file of ['index.js', 'presets.mjs', 'presets-review.mjs', 'router.md', 'presets/', 'cordis.patch.yml', 'skills/', 'agents/', 'docs/', 'automations/', 'scripts/', 'locale/', 'icon.svg', 'README.md', 'COMPATIBILITY.md', 'NOTICE.md', 'LICENSE']) {
   check(`manifest: files covers ${file}`, (manifest.files ?? []).some(entry => entry === file || entry === `${file}/`))
 }
 for (const locale of ['en', 'zh']) {
@@ -409,6 +435,14 @@ const stale = compareTrees(
 )
 check('upstream gate: an edited file that matches upstream is a stale expectation',
   stale.staleIdentical.join(',') === 'README.md' && stale.failed === 1)
+
+const restored = compareTrees(
+  new Map([['README.md', 'port-readme'], ['skills/x/SKILL.md', 'same'], ['plugin.json', 'manifest']]),
+  upstreamFiles,
+  expectations,
+)
+check('upstream gate: a file restored despite expectedMissing is a stale expectation',
+  restored.staleRestored?.join(',') === 'plugin.json' && restored.failed === 1)
 
 const extraFiles = compareTrees(
   new Map([['README.md', 'upstream-readme'], ['skills/x/SKILL.md', 'same'], ['docs/new.md', 'ours']]),

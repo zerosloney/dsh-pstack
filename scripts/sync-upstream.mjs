@@ -14,7 +14,7 @@
  *
  * Exit codes: 0 clean, 1 unexpected delta or stale expectation, 2 bad usage.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -52,9 +52,10 @@ export function compareTrees(port, upstream, {
     .sort()
   const staleIdentical = expectedChanged.filter(path =>
     upstream.has(path) && port.has(path) && upstream.get(path) === port.get(path))
+  const staleRestored = expectedMissing.filter(path => port.has(path))
   const extra = [...port.keys()].filter(path => !upstream.has(path)).sort()
-  const failed = unexpectedMissing.length + unexpectedChanged.length + staleMissing.length + staleIdentical.length
-  return { unexpectedMissing, unexpectedChanged, staleMissing, staleIdentical, extra, failed }
+  const failed = unexpectedMissing.length + unexpectedChanged.length + staleMissing.length + staleIdentical.length + staleRestored.length
+  return { unexpectedMissing, unexpectedChanged, staleMissing, staleIdentical, staleRestored, extra, failed }
 }
 
 function usage(message) {
@@ -126,6 +127,7 @@ function main() {
   section('unexpected missing from the port', result.unexpectedMissing)
   section('unexpected content change', result.unexpectedChanged)
   section('stale expectation, upstream no longer has the file', result.staleMissing)
+  section('stale expectation, file restored despite expectedMissing', result.staleRestored)
   section('stale expectation, file matches upstream now', result.staleIdentical)
   console.log(`\nextra in the port, informational (${result.extra.length})`)
 
@@ -136,4 +138,4 @@ function main() {
   console.log(`\nok: ${EXPECTED_MISSING.length} dropped, ${EXPECTED_CHANGED.length} edited, ${result.extra.length} added`)
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main()
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main()

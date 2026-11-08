@@ -108,7 +108,7 @@
 | `router.md` | 会话路由指令（等价上游 session-start 上下文） |
 | `cordis.patch.yml` | bundle 补丁：插两行 + 把新会话默认预设指向 `pstack` |
 | `scripts/session-transcript.mjs` | transcript 替换物：按 cwd 推 slug、按帧解 zstd |
-| `scripts/verify.mjs` | 静态 + 单测闸门（381 项） |
+| `scripts/verify.mjs` | 静态 + 单测闸门（390 项） |
 | `scripts/sync-upstream.mjs` | 上游逐字节闸门：报出意外漂移与过期期望（需本地 checkout） |
 | `docs/harness/deepseek-harness.md` | Cursor → DSH 对照表 |
 | `automations/benny/dsh-scheduled-tasks.md` | Automations → `schedule_create` 映射 |
@@ -145,8 +145,8 @@
 | 2 | 装载状态 | pstack-router / pstack-skills 均 active |
 | 3 | 技能目录 | setup-pstack 描述已是上游 0.15.36 原文，证明 customSkillDirs 压过 ~/.agents |
 | 4 | 隐藏语义 | skill poteto-mode 报 not available for model invocation；未知名字报 unknown — 两句不同即证明前者在册 |
-| 5 | 静态闸门 | node scripts/verify.mjs：381 项 |
-| 6 | 评审闸门 | node scripts/verify-review.mjs：61 项 |
+| 5 | 静态闸门 | node scripts/verify.mjs：390 项 |
+| 6 | 评审闸门 | node scripts/verify-review.mjs：72 项 |
 | 7 | 预设 config 对真 schema | 用 profile 内真实包逐个跑 Config：37 个通过，0 失败 |
 | 8 | 委派能力 | spawn 的 capabilities.agentPreset=true；fork=false，故 fork 不带白名单 |
 | 9 | 真实会话日志 | 1.42 MB / 698 帧 → 1263 行，100% 可 JSON.parse |

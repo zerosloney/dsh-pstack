@@ -101,7 +101,7 @@ dsh-pstack/
 │       └── deepseek-harness.md   # Cursor → DSH 对照表
 ├── automations/benny/        # 上游素材 + dsh-scheduled-tasks.md
 ├── scripts/
-│   ├── verify.mjs / verify-review.mjs   # 两段闸门（381 + 61 项）
+│   ├── verify.mjs / verify-review.mjs   # 两段闸门（390 + 72 项）
 │   ├── sync-upstream.mjs                # 上游逐字节闸门（需本地 checkout）
 │   ├── review-triage.mjs                # 评审线程 triage
 │   ├── session-transcript.mjs           # 会话日志读取（多帧 zstd）
@@ -130,10 +130,12 @@ dsh-pstack/
 ## 验证
 
 ```
-node scripts/verify.mjs          # 381 项：技能契约、预设组合、补丁、插件行为、适配文档
-node scripts/verify-review.mjs   # 61 项：review-triage 技能、工具自检、预设矩阵、摘要视图
+node scripts/verify.mjs          # 390 项：技能契约、预设组合、补丁、插件行为、适配文档
+node scripts/verify-review.mjs   # 72 项：review-triage 技能、工具自检、预设矩阵、摘要视图
 node scripts/sync-upstream.mjs --upstream <dir>/pstack   # 与上游逐字节比对，需先 clone
 ```
+
+`npm test` 跑前两条命令；上游字节契约不在 `npm test` 内，必须带本地上游 checkout 跑 `npm run verify:upstream -- --upstream <dir>/pstack`。
 
 会话里确认：
 
