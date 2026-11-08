@@ -98,8 +98,21 @@ function summarize(events) {
     if (type === 'session') { result.session = event; continue }
     if (type === 'approval/asked') { result.approvals.push({ asked: data }); continue }
     if (type === 'approval/decided') {
-      const last = result.approvals[result.approvals.length - 1]
-      if (last !== undefined && last.decided === undefined) last.decided = data
+      if (typeof data.id === 'string') {
+        // The harness stamps both events of a pair with one ApprovalRequestId
+        // (interaction/user-approval/src/types.ts), so pair by that id.
+        const asked = result.approvals.find(entry => entry.asked?.id === data.id && entry.decided === undefined)
+        if (asked !== undefined) asked.decided = data
+        else result.approvals.push({ decided: data })
+        continue
+      }
+      // No id on the decision (older or foreign logs): the previous heuristic
+      // attached to the most recent unresolved ask, which silently mispairs
+      // once two asks are open. Without an id the pairing is only certain
+      // while exactly one ask is pending; otherwise the decision is listed
+      // standalone instead of claiming a pairing it cannot prove.
+      const pending = result.approvals.filter(entry => entry.asked !== undefined && entry.decided === undefined)
+      if (pending.length === 1) pending[0].decided = data
       else result.approvals.push({ decided: data })
       continue
     }
@@ -115,7 +128,11 @@ function summarize(events) {
       result.tools.set(name, (result.tools.get(name) || 0) + 1)
       const input = data.input !== null && typeof data.input === 'object' ? data.input : data.arguments
       if (name === 'skill' && input !== null && typeof input === 'object' && typeof input.name === 'string') result.skills.push(input.name)
-      if (name === 'read' && input !== null && typeof input === 'object' && typeof input.path === 'string' && input.path.indexOf('skills/') !== -1) result.skills.push(input.path.replace(/.*skills\//, '').replace(/\/SKILL\.md$/, ''))
+      if (name === 'read' && input !== null && typeof input === 'object' && typeof input.path === 'string') {
+        // Windows tool calls carry backslash paths; normalize before matching.
+        const skillPath = input.path.replace(/\\/g, '/')
+        if (skillPath.indexOf('skills/') !== -1) result.skills.push(skillPath.replace(/.*skills\//, '').replace(/\/SKILL\.md$/, ''))
+      }
       if (input !== null && typeof input === 'object') {
         for (const key of ['path', 'file', 'file_path', 'destination']) {
           if (typeof input[key] === 'string' && (name === 'write' || name === 'edit' || name === 'apply_patch')) result.files.add(input[key])

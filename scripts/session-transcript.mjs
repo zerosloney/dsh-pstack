@@ -227,9 +227,22 @@ function allFramesText(buffer) {
 
 function describe(session) {
   const head = header(session.path)
+  // One log with a corrupt header must not kill the whole list: an unparseable
+  // createdAt keeps its raw value (with a stderr warning) instead of throwing
+  // RangeError out of toISOString().
+  let createdAt
+  if (head?.createdAt !== undefined) {
+    const parsed = new Date(head.createdAt)
+    if (Number.isNaN(parsed.getTime())) {
+      console.error(`warning: ${session.path}: invalid createdAt ${JSON.stringify(head.createdAt)}`)
+      createdAt = head.createdAt
+    } else {
+      createdAt = parsed.toISOString()
+    }
+  }
   return {
     sessionId: session.sessionId,
-    createdAt: head?.createdAt === undefined ? undefined : new Date(head.createdAt).toISOString(),
+    createdAt,
     cwd: head?.cwd,
     agentPreset: head?.agentPreset,
     delegationDepth: head?.delegationDepth,
@@ -273,6 +286,11 @@ function main() {
   if (sessions.length === 0) {
     console.error(`no session ${options.session === undefined ? '' : `matching "${options.session}" `}under ${join(sessionsRoot(), slug)}`)
     process.exit(1)
+  }
+  if (options.session !== undefined && sessions.length > 1) {
+    // An exact id can only hit one directory, so several hits mean prefix
+    // matching; say what got picked instead of silently choosing the newest.
+    console.error(`warning: ${sessions.length} sessions match prefix "${options.session}"; showing the newest (${sessions[0].sessionId})`)
   }
   const chosen = sessions[0]
   const buffer = readFileSync(chosen.path)

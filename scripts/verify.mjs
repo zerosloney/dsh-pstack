@@ -738,6 +738,65 @@ process.stdout.write(JSON.stringify(out))
     && broken.stderr.includes('session-transcript.mjs')
     && !broken.stderr.includes('\n    at '),
     `status ${broken.status}, stderr ${broken.stderr.slice(0, 300)}`)
+
+  // One log with a corrupt header date must not throw a RangeError that kills
+  // the whole list: the bad row keeps its raw value, every other session lists.
+  writeSession('date0505', zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', version: 4, id: 'session-date0505', createdAt: 'not-a-date', cwd: workspace, agentPreset: 'pstack' })}\n`)))
+  const badDate = runStatus(helper, ['list', '--cwd', workspace, '--json'])
+  const badRows = badDate.status === 0
+    ? badDate.stdout.trim().split('\n').map(line => { try { return JSON.parse(line) } catch { return undefined } })
+    : []
+  check('transcript: list survives a corrupt createdAt header',
+    badDate.status === 0
+    && badRows.some(row => row?.sessionId === 'date0505' && row.createdAt === 'not-a-date')
+    && badRows.some(row => row?.sessionId === 'edge0001'),
+    `status ${badDate.status}, stderr ${badDate.stderr.slice(0, 200)}, stdout ${badDate.stdout.slice(0, 200)}`)
+
+  // A --session prefix that hits several logs picks the newest; it must say so
+  // instead of silently choosing.
+  writeSession('pref0101', zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'user/message', seq: 1, data: { text: 'older prefix fixture' } })}\n`)))
+  writeSession('pref0102', zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'user/message', seq: 2, data: { text: 'newer prefix fixture' } })}\n`)))
+  const prefixRun = runStatus(helper, ['show', '--cwd', workspace, '--session', 'pref010'])
+  check('transcript: --session prefix matching several warns and still shows the newest',
+    prefixRun.status === 0
+    && prefixRun.stderr.includes('2 sessions match prefix "pref010"')
+    && prefixRun.stdout.includes('newer prefix fixture') && !prefixRun.stdout.includes('older prefix fixture'),
+    `status ${prefixRun.status}, stderr ${prefixRun.stderr}, stdout ${prefixRun.stdout.slice(0, 120)}`)
+
+  // Windows tool calls carry backslash paths; skills reads must still count.
+  writeSession('sklbck06', Buffer.concat([
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', version: 4, id: 'session-sklbck06', createdAt: 0, cwd: workspace, agentPreset: 'pstack' })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'tool/call', seq: 1, data: { name: 'read', input: { path: '.dsh\\skills\\win-skill\\SKILL.md' } } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'tool/call', seq: 2, data: { name: 'read', input: { path: 'skills/x/SKILL.md' } } })}\n`)),
+  ]))
+  const backslash = runStatus(summaryHelper, ['--cwd', workspace, '--session', 'sklbck06', '--json', '--kinds', 'skills'])
+  let backslashSkills = []
+  try { backslashSkills = JSON.parse(backslash.stdout || '{}').skills ?? [] } catch { /* failure detail below */ }
+  check('summary: backslash skill paths count as skills',
+    backslash.status === 0 && backslashSkills.includes('win-skill') && backslashSkills.includes('x'),
+    `status ${backslash.status}, stdout ${backslash.stdout.slice(0, 200)}`)
+
+  // The harness stamps approval/asked + approval/decided with one
+  // ApprovalRequestId (interaction/user-approval), so interleaved asks pair by
+  // id; an id-less decision still falls back to the single pending ask.
+  writeSession('app0707', Buffer.concat([
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', version: 4, id: 'session-app0707', createdAt: 0, cwd: workspace, agentPreset: 'pstack' })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/asked', seq: 1, data: { id: 'ap-a', toolName: 'write' } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/asked', seq: 2, data: { id: 'ap-b', toolName: 'edit' } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/decided', seq: 3, data: { id: 'ap-b', outcome: 'allowed-once' } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/decided', seq: 4, data: { id: 'ap-a', outcome: 'rejected' } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/asked', seq: 5, data: { toolName: 'bash' } })}\n`)),
+    zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'approval/decided', seq: 6, data: { outcome: 'allowed-once' } })}\n`)),
+  ]))
+  const paired = runStatus(summaryHelper, ['--cwd', workspace, '--session', 'app0707', '--json', '--kinds', 'approvals'])
+  let approvals = []
+  try { approvals = JSON.parse(paired.stdout || '{}').approvals ?? [] } catch { /* failure detail below */ }
+  check('summary: approvals pair by id when events carry one',
+    approvals.length === 3
+    && approvals[0]?.asked?.id === 'ap-a' && approvals[0]?.decided?.id === 'ap-a' && approvals[0]?.decided?.outcome === 'rejected'
+    && approvals[1]?.asked?.id === 'ap-b' && approvals[1]?.decided?.id === 'ap-b' && approvals[1]?.decided?.outcome === 'allowed-once'
+    && approvals[2]?.asked?.toolName === 'bash' && approvals[2]?.decided?.outcome === 'allowed-once',
+    `status ${paired.status}, approvals ${JSON.stringify(approvals).slice(0, 300)}`)
 } finally {
   rmSync(sandbox2, { recursive: true, force: true })
 }
