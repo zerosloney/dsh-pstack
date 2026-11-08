@@ -19,7 +19,7 @@
  *
  * No dependencies. Requires Node >= 22.19 for `node:zlib` zstd support.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -202,9 +202,19 @@ function allFramesText(buffer) {
           end = buffer.indexOf(FRAME_MAGIC, end + FRAME_MAGIC.length)
           continue
         }
-        // No further magic and still failing: the tail frame was cut mid-write.
-        // Keep the frames that decoded instead of losing the whole log; rethrow
-        // only when not even the first frame completed and there is nothing to show.
+        // No further magic and still failing. A start that still has a later
+        // magic is a fake one inside inter-frame garbage: resync to the next
+        // real frame instead of dropping every frame behind the garbage.
+        const nextMagic = buffer.indexOf(FRAME_MAGIC, start + FRAME_MAGIC.length)
+        if (nextMagic >= 0) {
+          console.error(`warning: skipped ${nextMagic - start} undecodable bytes at offset ${start}`)
+          start = nextMagic
+          end = buffer.indexOf(FRAME_MAGIC, start + FRAME_MAGIC.length)
+          continue
+        }
+        // Otherwise the tail frame was cut mid-write. Keep the frames that
+        // decoded instead of losing the whole log; rethrow only when not even
+        // the first frame completed and there is nothing to show.
         if (parts.length === 0) throw error
         console.error(`warning: truncated tail frame dropped (${buffer.length - start} bytes); ${parts.length} earlier frame(s) decoded`)
         cursor = buffer.length
@@ -294,4 +304,4 @@ function main() {
 // Exported for scripts/verify.mjs unit probes.
 export { slugFor, firstFrameText, allFramesText }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main()
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main()

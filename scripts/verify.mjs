@@ -6,7 +6,7 @@
  * be checked before installing: the skill frontmatter contract DSH's filesystem
  * provider enforces, the adapter wiring, and the router plugin's behavior.
  */
-import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -457,10 +457,11 @@ try {
   // frames must survive, the tail is dropped with a stderr warning.
   const frames = events.map(event => zstdCompressSync(Buffer.from(`${JSON.stringify(event)}\n`)))
   const { spawnSync } = await import('node:child_process')
-  const runHelperStatus = (...args) => spawnSync(process.execPath, [helper, ...args], {
+  const runScriptStatus = (script, ...args) => spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
     env: { ...process.env, DSH_HOME: join(sandbox, '.dsh') },
   })
+  const runHelperStatus = (...args) => runScriptStatus(helper, ...args)
   const tailFolder = join(sandbox, '.dsh', 'sessions', slug, 'session-tail4444')
   mkdirSync(tailFolder, { recursive: true })
   writeFileSync(
@@ -481,6 +482,46 @@ try {
   check('transcript: a truncated first frame stays fatal',
     headRun.status !== 0 && headRun.stderr.includes('cannot decompress'),
     `status ${headRun.status}, stderr ${headRun.stderr}`)
+  // Inter-frame garbage that happens to start with the frame magic must not be
+  // treated as a truncated tail: everything behind it, including intact frames,
+  // would be dropped with a misleading warning. The decoder must resync to the
+  // next real frame and say "skipped" instead.
+  const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const junkFolder = join(sandbox, '.dsh', 'sessions', slug, 'session-junk6666')
+  mkdirSync(junkFolder, { recursive: true })
+  const writeFrame = zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'tool/call', seq: 3, data: { name: 'write' } })}\n`))
+  const junk = Buffer.concat([MAGIC, Buffer.from('inter-frame garbage that only looks like a frame header')])
+  writeFileSync(
+    join(junkFolder, 'session.v4.jsonl.zstd'),
+    Buffer.concat([frames[0], frames[2], junk, writeFrame]),
+  )
+  const junkRun = runHelperStatus('show', '--cwd', workspace, '--session', 'junk6666')
+  check('transcript: fake-magic garbage between frames does not drop later frames',
+    junkRun.status === 0 && junkRun.stdout.includes('"name":"write"'),
+    `status ${junkRun.status}, stdout ${JSON.stringify(junkRun.stdout)}`)
+  check('transcript: fake-magic garbage warns skipped bytes, not truncated tail',
+    junkRun.stderr.includes('skipped') && !junkRun.stderr.includes('truncated tail frame dropped'),
+    junkRun.stderr)
+  // Node realpaths the main entry but keeps argv[1] as the link path, so an
+  // `import.meta.url === pathToFileURL(argv[1]).href` guard never matches through
+  // a junction: the script would exit 0 with no output. Invoked through a link it
+  // must still run. Windows junctions need no admin; POSIX falls back to a symlink.
+  const linkPath = join(sandbox, 'scripts-link')
+  let linkReady = false
+  try {
+    symlinkSync(join(ROOT, 'scripts'), linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+    linkReady = true
+  } catch (error) {
+    if (error.code !== 'EPERM') throw error
+  }
+  if (linkReady) {
+    const linkRun = runScriptStatus(join(linkPath, 'session-transcript.mjs'), 'show', '--cwd', workspace, '--session', 'abc123')
+    check('transcript: runs through a junction/symlink to the scripts dir',
+      linkRun.status === 0 && linkRun.stdout.includes('user/message'),
+      `status ${linkRun.status}, stdout ${JSON.stringify(linkRun.stdout)}, stderr ${linkRun.stderr}`)
+  } else {
+    console.log('note: links unavailable here; the junction/symlink check was skipped')
+  }
 } finally {
   rmSync(sandbox, { recursive: true, force: true })
 }
